@@ -1869,7 +1869,7 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
         </div>
       </section>
 
-      <div className="grid gap-6 xl:grid-cols-2">
+      <div className="grid gap-6">
         {goals.map((goal) => {
           const draft = contributionDrafts[goal.id] ?? { amount: '', month: now.getMonth() + 1, year: now.getFullYear() }
           const progress = Math.min((Number(goal.current_amount) / Number(goal.target_amount || 1)) * 100, 100)
@@ -1921,7 +1921,7 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
 
               <div className="mt-6 rounded-[1.5rem] bg-[var(--surface-muted)] p-4">
                 <p className="text-sm font-medium text-[var(--text-primary)]">Monthly contribution</p>
-                <div className="mt-4 grid gap-3 md:grid-cols-4">
+                <div className="mt-4 grid gap-3 lg:grid-cols-[1.1fr_0.9fr_0.9fr_auto]">
                   <input
                     type="number"
                     min="0"
@@ -2020,6 +2020,18 @@ function SettingsPage({
         return false
       }
 
+      const key = `${category.type}:${normalizeText(category.name)}`
+      if (seen.has(key)) {
+        return false
+      }
+
+      seen.add(key)
+      return true
+    })
+  }, [categories])
+  const visibleCategories = useMemo(() => {
+    const seen = new Set()
+    return categories.filter((category) => {
       const key = `${category.type}:${normalizeText(category.name)}`
       if (seen.has(key)) {
         return false
@@ -2192,7 +2204,7 @@ function SettingsPage({
         </form>
 
         <div className="mt-6 space-y-3">
-          {categories.map((category) => {
+          {visibleCategories.map((category) => {
             const isDefault = DEFAULT_CATEGORIES.some(
               (item) => item.type === category.type && normalizeText(item.name) === normalizeText(category.name),
             )
