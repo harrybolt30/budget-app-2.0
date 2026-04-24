@@ -13,11 +13,20 @@ export function currency(value, currencyCode = 'CAD') {
 }
 
 export function shortDate(value) {
+  if (!value) {
+    return 'Date needed'
+  }
+
+  const date = new Date(`${value}T00:00:00`)
+  if (Number.isNaN(date.getTime())) {
+    return 'Invalid date'
+  }
+
   return new Intl.DateTimeFormat('en-US', {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
-  }).format(new Date(`${value}T00:00:00`))
+  }).format(date)
 }
 
 export function monthLabel(date = new Date()) {

@@ -1579,8 +1579,11 @@ function TransactionsPage({
       selectedCount: importState.rows.filter((row) => row.include).length,
       selectedTotal: importState.rows.filter((row) => row.include).reduce((sum, row) => sum + Number(row.amount || 0), 0),
       needsDateCount: importState.rows.filter((row) => row.include && row.needsDateContext).length,
+      invalidDateCount: importState.rows.filter(
+        (row) => row.include && !resolveImportedDate(row, importState.assumedMonth, importState.assumedYear),
+      ).length,
     }),
-    [importState.rows],
+    [importState.assumedMonth, importState.assumedYear, importState.rows],
   )
 
   return (
@@ -1960,6 +1963,10 @@ function TransactionsPage({
                     <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Dates needing context</p>
                     <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">{importSummary.needsDateCount}</p>
                   </div>
+                  <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+                    <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Invalid dates</p>
+                    <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">{importSummary.invalidDateCount}</p>
+                  </div>
                 </div>
               </div>
 
@@ -2061,9 +2068,19 @@ function TransactionsPage({
                 ))}
               </datalist>
 
-              <button type="button" onClick={confirmImport} className="primary-button" disabled={!importSummary.selectedCount}>
+              <button
+                type="button"
+                onClick={confirmImport}
+                className="primary-button"
+                disabled={!importSummary.selectedCount || importSummary.invalidDateCount > 0}
+              >
                 Confirm import
               </button>
+              {importSummary.invalidDateCount > 0 && (
+                <p className="text-sm text-rose-500">
+                  Fix the rows showing invalid dates before importing.
+                </p>
+              )}
             </div>
           )}
         </section>
@@ -3859,19 +3876,25 @@ function buildImportRow({ defaultType = 'expense', id, rawAmount, rawCategory, r
 }
 
 function resolveImportedDate(row, assumedMonth, assumedYear) {
-  if (row.dateMode === 'day-only') {
-    return toDateInputValue(new Date(assumedYear, assumedMonth, Number(row.rawDate)))
+  const date =
+    row.dateMode === 'day-only'
+      ? new Date(assumedYear, assumedMonth, Number(row.rawDate))
+      : row.dateMode === 'month-day'
+        ? new Date(assumedYear, Number(row.parsedMonth) - 1, Number(row.parsedDay))
+        : new Date(row.rawDate)
+
+  if (Number.isNaN(date.getTime())) {
+    return null
   }
 
-  if (row.dateMode === 'month-day') {
-    return toDateInputValue(new Date(assumedYear, Number(row.parsedMonth) - 1, Number(row.parsedDay)))
-  }
-
-  return toDateInputValue(new Date(row.rawDate))
+  return toDateInputValue(date)
 }
 
 function formatImportPreviewDate(row, assumedMonth, assumedYear) {
   const resolvedDate = resolveImportedDate(row, assumedMonth, assumedYear)
+  if (!resolvedDate) {
+    return 'Invalid date, edit this row'
+  }
   return row.needsDateContext ? `${shortDate(resolvedDate)} (assumed)` : shortDate(resolvedDate)
 }
 
