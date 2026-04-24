@@ -1512,7 +1512,7 @@ function TransactionsPage({
           const rawDate = row[headerMap.date] ?? ''
           const rawCategory = row[headerMap.category] ?? 'Other'
           const rawName = row[headerMap.name] ?? ''
-          const dayOnly = /^\d{1,2}$/.test(String(rawDate).trim())
+          const parsedDateInfo = parseImportDateValue(rawDate)
 
           return {
             id: `import-${index}`,
@@ -1522,7 +1522,10 @@ function TransactionsPage({
             category: String(rawCategory).trim() || 'Other',
             type: 'expense',
             rawDate: String(rawDate).trim(),
-            needsDateContext: dayOnly,
+            needsDateContext: parsedDateInfo.mode !== 'full',
+            dateMode: parsedDateInfo.mode,
+            parsedMonth: parsedDateInfo.month,
+            parsedDay: parsedDateInfo.day,
           }
         })
 
@@ -1536,9 +1539,7 @@ function TransactionsPage({
       .filter((row) => row.include && row.description && row.amount)
       .map((row) => ({
         ...row,
-        date: row.needsDateContext
-          ? toDateInputValue(new Date(importState.assumedYear, importState.assumedMonth, Number(row.rawDate)))
-          : toDateInputValue(new Date(row.rawDate)),
+        date: resolveImportedDate(row, importState.assumedMonth, importState.assumedYear),
       }))
 
     await onImportTransactions(selectedRows)
@@ -1820,12 +1821,12 @@ function TransactionsPage({
                           assumedMonth: Number(event.target.value),
                         }))
                       }
-                      className="field"
-                    >
-                      {Array.from({ length: 12 }).map((_, monthIndex) => (
-                        <option key={monthIndex} value={monthIndex}>
-                          {new Date(2026, monthIndex, 1).toLocaleString('en-US', { month: 'long' })}
-                        </option>
+                        className="field select-field"
+                      >
+                        {Array.from({ length: 12 }).map((_, monthIndex) => (
+                          <option key={monthIndex} value={monthIndex}>
+                            {new Date(2026, monthIndex, 1).toLocaleString('en-US', { month: 'long' })}
+                          </option>
                       ))}
                     </select>
                   </label>
@@ -1841,10 +1842,13 @@ function TransactionsPage({
                         }))
                       }
                       className="field"
-                    />
-                  </label>
-                </div>
-              )}
+                      />
+                    </label>
+                    <p className="md:col-span-2 text-sm text-[var(--text-secondary)]">
+                      Use this when the CSV date is only a day number like `4`, or a month/day value like `4/15` without a year.
+                    </p>
+                  </div>
+                )}
 
               <div className="max-h-[26rem] overflow-auto rounded-3xl border border-[var(--border-soft)]">
                 <table className="min-w-full text-left text-sm">
@@ -1894,13 +1898,17 @@ function TransactionsPage({
                         </td>
                         <td className="px-3 py-3">{row.description}</td>
                         <td className="px-3 py-3">{row.category}</td>
-                        <td className="px-3 py-3">
-                          {row.needsDateContext
-                            ? `${new Date(importState.assumedYear, importState.assumedMonth, Number(row.rawDate)).toLocaleDateString('en-US', {
-                                month: 'short',
-                                day: 'numeric',
-                                year: 'numeric',
-                              })} (assumed)`
+                          <td className="px-3 py-3">
+                            {row.needsDateContext
+                              ? `${new Date(
+                                  importState.assumedYear,
+                                  row.dateMode === 'month-day' ? Number(row.parsedMonth) - 1 : importState.assumedMonth,
+                                  row.dateMode === 'month-day' ? Number(row.parsedDay) : Number(row.rawDate),
+                                ).toLocaleDateString('en-US', {
+                                  month: 'short',
+                                  day: 'numeric',
+                                  year: 'numeric',
+                                })} (assumed)`
                             : row.rawDate}
                         </td>
                         <td className="px-3 py-3">{formatCurrency(row.amount)}</td>
@@ -3667,6 +3675,37 @@ function addDaysToDateValue(dateValue, days) {
 
 function daysInMonth(year, monthIndex) {
   return new Date(year, monthIndex + 1, 0).getDate()
+}
+
+function parseImportDateValue(rawDate) {
+  const value = String(rawDate ?? '').trim()
+
+  if (/^\d{1,2}$/.test(value)) {
+    return { mode: 'day-only', day: Number(value), month: null }
+  }
+
+  const monthDayMatch = value.match(/^(\d{1,2})[/-](\d{1,2})$/)
+  if (monthDayMatch) {
+    return {
+      mode: 'month-day',
+      month: Number(monthDayMatch[1]),
+      day: Number(monthDayMatch[2]),
+    }
+  }
+
+  return { mode: 'full', day: null, month: null }
+}
+
+function resolveImportedDate(row, assumedMonth, assumedYear) {
+  if (row.dateMode === 'day-only') {
+    return toDateInputValue(new Date(assumedYear, assumedMonth, Number(row.rawDate)))
+  }
+
+  if (row.dateMode === 'month-day') {
+    return toDateInputValue(new Date(assumedYear, Number(row.parsedMonth) - 1, Number(row.parsedDay)))
+  }
+
+  return toDateInputValue(new Date(row.rawDate))
 }
 
 function buildDashboardData(transactions, budgetMap, goals, categoryMap) {
