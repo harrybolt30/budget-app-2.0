@@ -4,10 +4,10 @@ export function cn(...classes) {
   return classes.filter(Boolean).join(' ')
 }
 
-export function currency(value) {
-  return new Intl.NumberFormat('en-US', {
+export function currency(value, currencyCode = 'CAD') {
+  return new Intl.NumberFormat('en-CA', {
     style: 'currency',
-    currency: 'USD',
+    currency: currencyCode,
     maximumFractionDigits: 2,
   }).format(Number(value || 0))
 }
@@ -114,4 +114,32 @@ export function estimateMonthsRemaining(goal) {
   }
 
   return `${Math.ceil(remaining / averageContribution)} mo left`
+}
+
+export function addRecurringInterval(dateValue, frequency) {
+  const nextDate = new Date(`${dateValue}T00:00:00`)
+
+  if (frequency === 'daily') {
+    nextDate.setDate(nextDate.getDate() + 1)
+  } else if (frequency === 'weekly') {
+    nextDate.setDate(nextDate.getDate() + 7)
+  } else {
+    nextDate.setMonth(nextDate.getMonth() + 1)
+  }
+
+  return toDateInputValue(nextDate)
+}
+
+export function compareDateOnly(left, right) {
+  return left.localeCompare(right)
+}
+
+export function monthKey(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+}
+
+export function getDaysUntil(dateValue) {
+  const todayDate = new Date(`${today()}T00:00:00`)
+  const targetDate = new Date(`${dateValue}T00:00:00`)
+  return Math.round((targetDate.getTime() - todayDate.getTime()) / 86400000)
 }

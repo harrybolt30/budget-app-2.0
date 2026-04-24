@@ -15,14 +15,24 @@ import {
   YAxis,
 } from 'recharts'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { ACCENT_OPTIONS, DEFAULT_CATEGORIES, NAV_ITEMS } from './lib/constants'
+import {
+  ACCENT_OPTIONS,
+  CURRENCY_OPTIONS,
+  DEFAULT_CATEGORIES,
+  NAV_ITEMS,
+  RECURRING_FREQUENCIES,
+} from './lib/constants'
 import { hasSupabaseEnv, supabase } from './lib/supabase'
 import {
+  addRecurringInterval,
   buildMonthWeeks,
   cn,
+  compareDateOnly,
   currency,
   estimateMonthsRemaining,
   getCategoryVisual,
+  getDaysUntil,
+  monthKey,
   monthLabel,
   normalizeText,
   parseAmount,
@@ -33,7 +43,7 @@ import {
   toDateInputValue,
 } from './lib/utils'
 
-const DEFAULT_THEME = { theme: 'light', accent_color: 'blue' }
+const DEFAULT_THEME = { theme: 'light', accent_color: 'blue', currency: 'CAD' }
 
 function App() {
   const location = useLocation()
@@ -77,7 +87,6 @@ function App() {
       if (event === 'PASSWORD_RECOVERY') {
         navigate('/reset-password', { replace: true })
       }
-
     })
 
     return () => {
@@ -105,7 +114,7 @@ function App() {
     return <AuthScreen notice={notice} onNotice={setNotice} />
   }
 
-  return <BudgetApp user={user} onNotice={setNotice} notice={notice} />
+  return <BudgetApp user={user} notice={notice} onNotice={setNotice} />
 }
 
 function BudgetApp({ user, notice, onNotice }) {
@@ -115,9 +124,15 @@ function BudgetApp({ user, notice, onNotice }) {
   const [goals, setGoals] = useState([])
   const [contributions, setContributions] = useState([])
   const [settings, setSettings] = useState(DEFAULT_THEME)
+  const [recurringTransactions, setRecurringTransactions] = useState([])
+  const [categoryBudgets, setCategoryBudgets] = useState([])
+  const [bills, setBills] = useState([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
+  const [dismissedOverspendSignature, setDismissedOverspendSignature] = useState(
+    () => window.localStorage.getItem(`overspend-dismissed:${user.id}`) ?? '',
+  )
 
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme ?? 'light'
@@ -139,23 +154,55 @@ function BudgetApp({ user, notice, onNotice }) {
         const seededCategories = await ensureCategories(user.id)
         const userSettings = await ensureSettings(user.id)
 
-        const [{ data: transactionsData, error: transactionsError }, { data: goalsData, error: goalsError }] =
-          await Promise.all([
-            supabase
-              .from('transactions')
-              .select('id, user_id, date, amount, type, category_id, description, created_at')
-              .eq('user_id', user.id)
-              .order('date', { ascending: false })
-              .order('created_at', { ascending: false }),
-            supabase
-              .from('goals')
-              .select('id, user_id, name, target_amount, current_amount, deadline')
-              .eq('user_id', user.id)
-              .order('deadline', { ascending: true, nullsFirst: false }),
-          ])
+        const { data: recurringData, error: recurringError } = await supabase
+          .from('recurring_transactions')
+          .select('id, user_id, description, amount, type, category_id, frequency, next_date, active, created_at')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+
+        if (recurringError) throw recurringError
+
+        await generateDueRecurringTransactions(recurringData ?? [], user.id)
+
+        const [
+          { data: transactionsData, error: transactionsError },
+          { data: goalsData, error: goalsError },
+          { data: refreshedRecurringData, error: refreshedRecurringError },
+          { data: budgetsData, error: budgetsError },
+          { data: billsData, error: billsError },
+        ] = await Promise.all([
+          supabase
+            .from('transactions')
+            .select('id, user_id, date, amount, type, category_id, description, notes, split_group_id, created_at')
+            .eq('user_id', user.id)
+            .order('date', { ascending: false })
+            .order('created_at', { ascending: false }),
+          supabase
+            .from('goals')
+            .select('id, user_id, name, target_amount, current_amount, deadline')
+            .eq('user_id', user.id)
+            .order('deadline', { ascending: true, nullsFirst: false }),
+          supabase
+            .from('recurring_transactions')
+            .select('id, user_id, description, amount, type, category_id, frequency, next_date, active, created_at')
+            .eq('user_id', user.id)
+            .order('created_at', { ascending: false }),
+          supabase
+            .from('category_budgets')
+            .select('id, user_id, category_id, monthly_limit')
+            .eq('user_id', user.id),
+          supabase
+            .from('bills')
+            .select('id, user_id, name, amount, due_date, category_id, paid, created_at')
+            .eq('user_id', user.id)
+            .order('due_date', { ascending: true }),
+        ])
 
         if (transactionsError) throw transactionsError
         if (goalsError) throw goalsError
+        if (refreshedRecurringError) throw refreshedRecurringError
+        if (budgetsError) throw budgetsError
+        if (billsError) throw billsError
 
         const goalIds = (goalsData ?? []).map((goal) => goal.id)
         let contributionsData = []
@@ -174,10 +221,13 @@ function BudgetApp({ user, notice, onNotice }) {
 
         if (!cancelled) {
           setCategories(seededCategories)
-          setSettings(userSettings)
+          setSettings({ ...DEFAULT_THEME, ...userSettings })
           setTransactions(transactionsData ?? [])
           setGoals(goalsData ?? [])
           setContributions(contributionsData)
+          setRecurringTransactions(refreshedRecurringData ?? [])
+          setCategoryBudgets(budgetsData ?? [])
+          setBills(billsData ?? [])
         }
       } catch (error) {
         onNotice(error.message || 'Unable to load your budget data.')
@@ -195,6 +245,9 @@ function BudgetApp({ user, notice, onNotice }) {
     }
   }, [onNotice, refreshKey, user.id])
 
+  const currencyCode = settings.currency || 'CAD'
+  const formatCurrency = (value) => currency(value, currencyCode)
+
   const categoryMap = useMemo(
     () =>
       categories.reduce((map, category) => {
@@ -202,6 +255,15 @@ function BudgetApp({ user, notice, onNotice }) {
         return map
       }, {}),
     [categories],
+  )
+
+  const budgetMap = useMemo(
+    () =>
+      categoryBudgets.reduce((map, budget) => {
+        map[budget.category_id] = Number(budget.monthly_limit)
+        return map
+      }, {}),
+    [categoryBudgets],
   )
 
   const transactionsWithCategory = useMemo(
@@ -214,10 +276,29 @@ function BudgetApp({ user, notice, onNotice }) {
     [categoryMap, transactions],
   )
 
-  const dashboardData = useMemo(() => buildDashboardData(transactionsWithCategory), [transactionsWithCategory])
-  const enrichedGoals = useMemo(
-    () => enrichGoals(goals, contributions),
-    [contributions, goals],
+  const billsWithCategory = useMemo(
+    () =>
+      bills.map((bill) => ({
+        ...bill,
+        amount: Number(bill.amount),
+        category: categoryMap[bill.category_id] ?? null,
+      })),
+    [bills, categoryMap],
+  )
+
+  const dashboardData = useMemo(
+    () => buildDashboardData(transactionsWithCategory, budgetMap, goals, categoryMap),
+    [budgetMap, categoryMap, goals, transactionsWithCategory],
+  )
+
+  const enrichedGoals = useMemo(() => enrichGoals(goals, contributions), [contributions, goals])
+
+  const overspendSignature = useMemo(
+    () =>
+      dashboardData.overBudgetCategories
+        .map((item) => `${monthKey()}|${item.categoryId}|${item.spent.toFixed(2)}|${item.limit.toFixed(2)}`)
+        .join('::'),
+    [dashboardData.overBudgetCategories],
   )
 
   async function refreshData() {
@@ -231,20 +312,66 @@ function BudgetApp({ user, notice, onNotice }) {
       const basePayload = {
         user_id: user.id,
         date: payload.date,
-        amount: Number(payload.amount),
         type: payload.type,
-        category_id: payload.category_id,
         description: payload.description.trim(),
+        notes: payload.notes?.trim() || null,
       }
 
-      const query = transactionId
-        ? supabase.from('transactions').update(basePayload).eq('id', transactionId).eq('user_id', user.id)
-        : supabase.from('transactions').insert(basePayload)
+      if (payload.split_enabled && payload.splits.length) {
+        if (transactionId) {
+          throw new Error('Split transactions can only be created as new entries.')
+        }
 
-      const { error } = await query
-      if (error) throw error
+        const splitTotal = payload.splits.reduce((sum, split) => sum + Number(split.amount || 0), 0)
+        if (Math.abs(splitTotal - Number(payload.amount)) > 0.009) {
+          throw new Error('Split amounts must add up to the total transaction amount.')
+        }
 
-      onNotice(transactionId ? 'Transaction updated.' : 'Transaction saved.')
+        const splitGroupId = crypto.randomUUID()
+        const rows = payload.splits.map((split) => ({
+          ...basePayload,
+          amount: Number(split.amount),
+          category_id: split.category_id,
+          split_group_id: splitGroupId,
+        }))
+
+        const { error } = await supabase.from('transactions').insert(rows)
+        if (error) throw error
+
+        onNotice('Split transaction saved.')
+      } else {
+        const rowPayload = {
+          ...basePayload,
+          amount: Number(payload.amount),
+          category_id: payload.category_id,
+          split_group_id: null,
+        }
+
+        const query = transactionId
+          ? supabase.from('transactions').update(rowPayload).eq('id', transactionId).eq('user_id', user.id)
+          : supabase.from('transactions').insert(rowPayload)
+
+        const { error } = await query
+        if (error) throw error
+
+        if (payload.recurring_enabled && !transactionId) {
+          const { error: recurringError } = await supabase.from('recurring_transactions').insert({
+            user_id: user.id,
+            description: payload.description.trim(),
+            amount: Number(payload.amount),
+            type: payload.type,
+            category_id: payload.category_id,
+            frequency: payload.recurring_frequency,
+            next_date: addRecurringInterval(payload.date, payload.recurring_frequency),
+            active: true,
+          })
+
+          if (recurringError) throw recurringError
+        }
+
+        onNotice(transactionId ? 'Transaction updated.' : 'Transaction saved.')
+      }
+
       await refreshData()
     } catch (error) {
       onNotice(error.message || 'Unable to save transaction.')
@@ -310,17 +437,32 @@ function BudgetApp({ user, notice, onNotice }) {
       )
 
       if (fallbackCategory) {
-        const { error: transactionError } = await supabase
-          .from('transactions')
-          .update({ category_id: fallbackCategory.id })
-          .eq('user_id', user.id)
-          .eq('category_id', category.id)
+        const relatedUpdates = [
+          supabase
+            .from('transactions')
+            .update({ category_id: fallbackCategory.id })
+            .eq('user_id', user.id)
+            .eq('category_id', category.id),
+          supabase
+            .from('bills')
+            .update({ category_id: fallbackCategory.id })
+            .eq('user_id', user.id)
+            .eq('category_id', category.id),
+          supabase
+            .from('recurring_transactions')
+            .update({ category_id: fallbackCategory.id })
+            .eq('user_id', user.id)
+            .eq('category_id', category.id),
+        ]
 
-        if (transactionError) throw transactionError
+        const results = await Promise.all(relatedUpdates)
+        const failed = results.find((result) => result.error)
+        if (failed?.error) throw failed.error
       }
 
-      const { error } = await supabase.from('categories').delete().eq('id', category.id).eq('user_id', user.id)
+      await supabase.from('category_budgets').delete().eq('user_id', user.id).eq('category_id', category.id)
 
+      const { error } = await supabase.from('categories').delete().eq('id', category.id).eq('user_id', user.id)
       if (error) throw error
 
       onNotice('Category deleted.')
@@ -410,21 +552,114 @@ function BudgetApp({ user, notice, onNotice }) {
 
   async function saveSettings(nextSettings) {
     try {
-        const { error } = await supabase.from('settings').upsert(
-          {
-            user_id: user.id,
-            theme: nextSettings.theme,
-            accent_color: nextSettings.accent_color,
-          },
-          { onConflict: 'user_id' },
-        )
+      const payload = {
+        user_id: user.id,
+        theme: nextSettings.theme,
+        accent_color: nextSettings.accent_color,
+        currency: nextSettings.currency,
+      }
 
+      const { error } = await supabase.from('settings').upsert(payload, { onConflict: 'user_id' })
       if (error) throw error
 
       setSettings(nextSettings)
       onNotice('Preferences saved.')
     } catch (error) {
       onNotice(error.message || 'Unable to save settings.')
+    }
+  }
+
+  async function saveBudgetLimit(categoryId, monthlyLimit) {
+    try {
+      if (!monthlyLimit) {
+        await supabase.from('category_budgets').delete().eq('user_id', user.id).eq('category_id', categoryId)
+      } else {
+        const { error } = await supabase.from('category_budgets').upsert(
+          {
+            user_id: user.id,
+            category_id: categoryId,
+            monthly_limit: Number(monthlyLimit),
+          },
+          { onConflict: 'user_id,category_id' },
+        )
+
+        if (error) throw error
+      }
+
+      onNotice('Budget limit saved.')
+      await refreshData()
+    } catch (error) {
+      onNotice(error.message || 'Unable to save budget limit.')
+    }
+  }
+
+  async function updateRecurringTransaction(recurringId, payload) {
+    try {
+      const { error } = await supabase
+        .from('recurring_transactions')
+        .update(payload)
+        .eq('id', recurringId)
+        .eq('user_id', user.id)
+
+      if (error) throw error
+
+      onNotice('Recurring transaction updated.')
+      await refreshData()
+    } catch (error) {
+      onNotice(error.message || 'Unable to update recurring transaction.')
+    }
+  }
+
+  async function deleteRecurringTransaction(recurringId) {
+    try {
+      const { error } = await supabase
+        .from('recurring_transactions')
+        .delete()
+        .eq('id', recurringId)
+        .eq('user_id', user.id)
+
+      if (error) throw error
+
+      onNotice('Recurring transaction deleted.')
+      await refreshData()
+    } catch (error) {
+      onNotice(error.message || 'Unable to delete recurring transaction.')
+    }
+  }
+
+  async function saveBill(payload, billId = null) {
+    try {
+      const basePayload = {
+        user_id: user.id,
+        name: payload.name.trim(),
+        amount: Number(payload.amount),
+        due_date: payload.due_date,
+        category_id: payload.category_id,
+        paid: Boolean(payload.paid),
+      }
+
+      const query = billId
+        ? supabase.from('bills').update(basePayload).eq('id', billId).eq('user_id', user.id)
+        : supabase.from('bills').insert(basePayload)
+
+      const { error } = await query
+      if (error) throw error
+
+      onNotice(billId ? 'Bill updated.' : 'Bill added.')
+      await refreshData()
+    } catch (error) {
+      onNotice(error.message || 'Unable to save bill.')
+    }
+  }
+
+  async function deleteBill(billId) {
+    try {
+      const { error } = await supabase.from('bills').delete().eq('id', billId).eq('user_id', user.id)
+      if (error) throw error
+      onNotice('Bill removed.')
+      await refreshData()
+    } catch (error) {
+      onNotice(error.message || 'Unable to delete bill.')
     }
   }
 
@@ -481,6 +716,8 @@ function BudgetApp({ user, notice, onNotice }) {
           type: row.type,
           category_id: categoryByName.get(`${row.type}:${normalizeText(row.category)}`)?.id ?? null,
           description: row.description,
+          notes: null,
+          split_group_id: null,
         })
       }
 
@@ -499,6 +736,32 @@ function BudgetApp({ user, notice, onNotice }) {
     }
   }
 
+  function dismissOverspendAlert() {
+    window.localStorage.setItem(`overspend-dismissed:${user.id}`, overspendSignature)
+    setDismissedOverspendSignature(overspendSignature)
+  }
+
+  function exportTransactions() {
+    const rows = transactionsWithCategory.map((transaction) => ({
+      Date: transaction.date,
+      Description: transaction.description,
+      Amount: Number(transaction.amount).toFixed(2),
+      Type: transaction.type,
+      Category: transaction.category?.name ?? '',
+      Notes: transaction.notes ?? '',
+    }))
+
+    const csv = Papa.unparse(rows)
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `transactions_export_${monthKey()}.csv`
+    link.click()
+    window.URL.revokeObjectURL(url)
+    onNotice('Transactions exported.')
+  }
+
   if (loading) {
     return <LoadingScreen />
   }
@@ -507,12 +770,19 @@ function BudgetApp({ user, notice, onNotice }) {
     dashboard: (
       <DashboardPage
         dashboardData={dashboardData}
+        dismissedOverspendSignature={dismissedOverspendSignature}
+        formatCurrency={formatCurrency}
+        onDismissOverspend={dismissOverspendAlert}
+        overspendSignature={overspendSignature}
         transactions={transactionsWithCategory}
       />
     ),
     transactions: (
       <TransactionsPage
+        budgetProgress={dashboardData.budgetProgress}
         categories={categories}
+        currencyCode={currencyCode}
+        formatCurrency={formatCurrency}
         onDeleteTransaction={deleteTransaction}
         onImportTransactions={importTransactions}
         onSaveTransaction={saveTransaction}
@@ -520,8 +790,18 @@ function BudgetApp({ user, notice, onNotice }) {
         transactions={transactionsWithCategory}
       />
     ),
+    bills: (
+      <BillsPage
+        bills={billsWithCategory}
+        categories={categories.filter((category) => category.type === 'expense')}
+        formatCurrency={formatCurrency}
+        onDeleteBill={deleteBill}
+        onSaveBill={saveBill}
+      />
+    ),
     goals: (
       <GoalsPage
+        formatCurrency={formatCurrency}
         goals={enrichedGoals}
         onAddContribution={addGoalContribution}
         onDeleteGoal={deleteGoal}
@@ -530,12 +810,19 @@ function BudgetApp({ user, notice, onNotice }) {
     ),
     settings: (
       <SettingsPage
+        budgetMap={budgetMap}
         categories={categories}
+        formatCurrency={formatCurrency}
         notice={notice}
         onCreateCategory={createCategory}
         onDeleteCategory={removeCategory}
+        onDeleteRecurring={deleteRecurringTransaction}
+        onExportTransactions={exportTransactions}
+        onSaveBudgetLimit={saveBudgetLimit}
         onSaveSettings={saveSettings}
+        onToggleRecurring={updateRecurringTransaction}
         onUpdateCategory={updateCategory}
+        recurringTransactions={recurringTransactions}
         settings={settings}
       />
     ),
@@ -572,7 +859,7 @@ function Sidebar({ activeView, onChange, user }) {
         <p className="text-xs uppercase tracking-[0.35em] text-[var(--text-muted)]">Budget Flow</p>
         <h1 className="mt-3 text-3xl font-semibold tracking-tight text-[var(--text-primary)]">Your money, in motion.</h1>
         <p className="mt-3 text-sm text-[var(--text-secondary)]">
-          Track spending, protect goals, and keep your monthly plan simple.
+          Track spending, protect goals, stay ahead of bills, and keep your monthly plan simple.
         </p>
       </div>
 
@@ -627,9 +914,42 @@ function MobileNav({ activeView, onChange }) {
   )
 }
 
-function DashboardPage({ dashboardData, transactions }) {
+function DashboardPage({
+  dashboardData,
+  dismissedOverspendSignature,
+  formatCurrency,
+  onDismissOverspend,
+  overspendSignature,
+  transactions,
+}) {
+  const showOverspendBanner =
+    dashboardData.overBudgetCategories.length &&
+    overspendSignature &&
+    dismissedOverspendSignature !== overspendSignature
+
   return (
     <div className="space-y-6">
+      {showOverspendBanner && (
+        <section className="rounded-[2rem] border border-rose-300 bg-rose-50 p-5 text-rose-950 shadow-soft dark:border-rose-900 dark:bg-rose-950/20 dark:text-rose-100">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-xs uppercase tracking-[0.3em]">Overspend Alert</p>
+              <h2 className="mt-2 text-xl font-semibold">You are over budget in {dashboardData.overBudgetCategories.length} categor{dashboardData.overBudgetCategories.length === 1 ? 'y' : 'ies'}.</h2>
+              <div className="mt-3 space-y-1 text-sm">
+                {dashboardData.overBudgetCategories.map((item) => (
+                  <p key={item.categoryId}>
+                    {item.name} is over by {formatCurrency(item.spent - item.limit)}
+                  </p>
+                ))}
+              </div>
+            </div>
+            <button type="button" onClick={onDismissOverspend} className="rounded-full bg-white/80 px-4 py-2 text-sm font-medium text-rose-700">
+              Dismiss
+            </button>
+          </div>
+        </section>
+      )}
+
       <section className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
         <div className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
           <div className="flex flex-wrap items-center justify-between gap-4">
@@ -638,14 +958,15 @@ function DashboardPage({ dashboardData, transactions }) {
               <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">{monthLabel()}</h2>
             </div>
             <div className="rounded-full bg-[var(--surface-muted)] px-4 py-2 text-sm text-[var(--text-secondary)]">
-              Running balance {currency(dashboardData.runningBalance)}
+              Running balance {formatCurrency(dashboardData.runningBalance)}
             </div>
           </div>
 
-          <div className="mt-6 grid gap-4 sm:grid-cols-3">
-            <SummaryCard label="Income" value={currency(dashboardData.monthlyIncome)} tone="positive" />
-            <SummaryCard label="Expenses" value={currency(dashboardData.monthlyExpenses)} tone="negative" />
-            <SummaryCard label="Net" value={currency(dashboardData.netBalance)} tone="neutral" />
+          <div className="mt-6 grid gap-4 sm:grid-cols-4">
+            <SummaryCard label="Income" value={formatCurrency(dashboardData.monthlyIncome)} tone="positive" />
+            <SummaryCard label="Expenses" value={formatCurrency(dashboardData.monthlyExpenses)} tone="negative" />
+            <SummaryCard label="Net" value={formatCurrency(dashboardData.netBalance)} tone="neutral" />
+            <SummaryCard label="Net Worth" value={formatCurrency(dashboardData.netWorth)} tone="neutral" />
           </div>
         </div>
 
@@ -656,13 +977,10 @@ function DashboardPage({ dashboardData, transactions }) {
               <div key={week.label} className="rounded-2xl bg-[var(--surface-muted)] p-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium text-[var(--text-primary)]">{week.label}</span>
-                  <span className="text-sm text-[var(--text-secondary)]">{currency(week.total)}</span>
+                  <span className="text-sm text-[var(--text-secondary)]">{formatCurrency(week.total)}</span>
                 </div>
                 <div className="mt-3 h-2 rounded-full bg-[var(--border-soft)]">
-                  <div
-                    className="h-2 rounded-full bg-[var(--accent)]"
-                    style={{ width: `${week.percent}%` }}
-                  />
+                  <div className="h-2 rounded-full bg-[var(--accent)]" style={{ width: `${week.percent}%` }} />
                 </div>
               </div>
             ))}
@@ -687,7 +1005,7 @@ function DashboardPage({ dashboardData, transactions }) {
                     <Cell key={entry.name} fill={entry.color} />
                   ))}
                 </Pie>
-                <Tooltip formatter={(value) => currency(value)} />
+                <Tooltip formatter={(value) => formatCurrency(value)} />
               </PieChart>
             </ResponsiveContainer>
           </div>
@@ -711,10 +1029,38 @@ function DashboardPage({ dashboardData, transactions }) {
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border-soft)" vertical={false} />
                 <XAxis dataKey="label" stroke="var(--text-muted)" />
                 <YAxis stroke="var(--text-muted)" />
-                <Tooltip formatter={(value) => currency(value)} />
+                <Tooltip formatter={(value) => formatCurrency(value)} />
                 <Bar dataKey="total" fill="var(--accent)" radius={[16, 16, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
+          </div>
+        </ChartCard>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-2">
+        <ChartCard title="Net Worth" subtitle="Trailing 12 months">
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={dashboardData.netWorthHistory}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-soft)" vertical={false} />
+                <XAxis dataKey="label" stroke="var(--text-muted)" />
+                <YAxis stroke="var(--text-muted)" />
+                <Tooltip formatter={(value) => formatCurrency(value)} />
+                <Line type="monotone" dataKey="value" stroke="var(--accent)" strokeWidth={3} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </ChartCard>
+
+        <ChartCard title="Budget Limits" subtitle="Current month category progress">
+          <div className="space-y-4">
+            {dashboardData.budgetProgress.length ? (
+              dashboardData.budgetProgress.map((item) => (
+                <BudgetProgressRow key={item.categoryId} item={item} formatCurrency={formatCurrency} />
+              ))
+            ) : (
+              <p className="text-sm text-[var(--text-secondary)]">Set budget limits in Settings to track category caps here.</p>
+            )}
           </div>
         </ChartCard>
       </section>
@@ -726,7 +1072,7 @@ function DashboardPage({ dashboardData, transactions }) {
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border-soft)" vertical={false} />
               <XAxis dataKey="label" stroke="var(--text-muted)" />
               <YAxis stroke="var(--text-muted)" />
-              <Tooltip formatter={(value) => currency(value)} />
+              <Tooltip formatter={(value) => formatCurrency(value)} />
               <Line type="monotone" dataKey="balance" stroke="var(--accent)" strokeWidth={3} dot={false} />
             </LineChart>
           </ResponsiveContainer>
@@ -738,8 +1084,19 @@ function DashboardPage({ dashboardData, transactions }) {
               <p className="mt-1 text-xs text-[var(--text-secondary)]">{shortDate(transaction.date)}</p>
               <p className="mt-3 text-sm font-semibold text-[var(--text-primary)]">
                 {transaction.type === 'income' ? '+' : '-'}
-                {currency(transaction.amount)}
+                {formatCurrency(transaction.amount)}
               </p>
+            </div>
+          ))}
+        </div>
+      </ChartCard>
+
+      <ChartCard title="Insights" subtitle="Smart monthly callouts from your data">
+        <div className="grid gap-4 md:grid-cols-3">
+          {dashboardData.insights.map((insight) => (
+            <div key={insight.title} className="rounded-3xl bg-[var(--surface-muted)] p-5">
+              <p className="text-sm font-semibold text-[var(--text-primary)]">{insight.title}</p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">{insight.body}</p>
             </div>
           ))}
         </div>
@@ -749,7 +1106,9 @@ function DashboardPage({ dashboardData, transactions }) {
 }
 
 function TransactionsPage({
+  budgetProgress,
   categories,
+  formatCurrency,
   onDeleteTransaction,
   onImportTransactions,
   onSaveTransaction,
@@ -764,13 +1123,7 @@ function TransactionsPage({
     endDate: '',
   })
   const [editingId, setEditingId] = useState(null)
-  const [form, setForm] = useState({
-    date: today(),
-    amount: '',
-    type: 'expense',
-    category_id: '',
-    description: '',
-  })
+  const [form, setForm] = useState(buildTransactionForm(categories))
   const [importState, setImportState] = useState({
     rows: [],
     assumedMonth: new Date().getMonth(),
@@ -779,6 +1132,9 @@ function TransactionsPage({
 
   const filteredCategories = categories.filter((category) => category.type === form.type)
   const selectedCategoryId = form.category_id || filteredCategories[0]?.id || ''
+  const availableSplitCategories = categories.filter((category) => category.type === form.type)
+  const splitTotal = form.splits.reduce((sum, split) => sum + Number(split.amount || 0), 0)
+  const splitRemaining = Number(form.amount || 0) - splitTotal
 
   const visibleTransactions = useMemo(() => {
     return transactions.filter((transaction) => {
@@ -788,7 +1144,7 @@ function TransactionsPage({
       if (filters.endDate && transaction.date > filters.endDate) return false
       if (
         filters.query &&
-        !`${transaction.description} ${transaction.category?.name ?? ''}`
+        !`${transaction.description} ${transaction.notes ?? ''} ${transaction.category?.name ?? ''}`
           .toLowerCase()
           .includes(filters.query.toLowerCase())
       ) {
@@ -803,6 +1159,16 @@ function TransactionsPage({
       const next = { ...current, [field]: value }
       if (field === 'type') {
         next.category_id = categories.find((category) => category.type === value)?.id ?? ''
+        next.splits = current.splits.map((split) => ({
+          ...split,
+          category_id: categories.find((category) => category.type === value)?.id ?? '',
+        }))
+      }
+      if (field === 'split_enabled' && value) {
+        next.recurring_enabled = false
+      }
+      if (field === 'recurring_enabled' && value) {
+        next.split_enabled = false
       }
       return next
     })
@@ -810,18 +1176,18 @@ function TransactionsPage({
 
   function resetForm() {
     setEditingId(null)
-    setForm({
-      date: today(),
-      amount: '',
-      type: 'expense',
-      category_id: categories.find((category) => category.type === 'expense')?.id ?? '',
-      description: '',
-    })
+    setForm(buildTransactionForm(categories))
   }
 
   async function submitForm(event) {
     event.preventDefault()
-    await onSaveTransaction({ ...form, category_id: selectedCategoryId }, editingId)
+    await onSaveTransaction(
+      {
+        ...form,
+        category_id: selectedCategoryId,
+      },
+      editingId,
+    )
     resetForm()
   }
 
@@ -833,6 +1199,11 @@ function TransactionsPage({
       type: transaction.type,
       category_id: transaction.category_id,
       description: transaction.description,
+      notes: transaction.notes ?? '',
+      recurring_enabled: false,
+      recurring_frequency: 'monthly',
+      split_enabled: false,
+      splits: [{ category_id: transaction.category_id, amount: transaction.amount }],
     })
   }
 
@@ -848,16 +1219,16 @@ function TransactionsPage({
         }, {})
 
         const parsedRows = data.map((row, index) => {
-          const rawDate = row[headerMap['date']] ?? ''
-          const rawCategory = row[headerMap['category']] ?? 'Other'
-          const rawName = row[headerMap['name']] ?? ''
+          const rawDate = row[headerMap.date] ?? ''
+          const rawCategory = row[headerMap.category] ?? 'Other'
+          const rawName = row[headerMap.name] ?? ''
           const dayOnly = /^\d{1,2}$/.test(String(rawDate).trim())
 
           return {
             id: `import-${index}`,
             include: true,
             description: String(rawName).trim(),
-            amount: parseAmount(row[headerMap['amount']]),
+            amount: parseAmount(row[headerMap.amount]),
             category: String(rawCategory).trim() || 'Other',
             type: 'expense',
             rawDate: String(rawDate).trim(),
@@ -904,21 +1275,11 @@ function TransactionsPage({
 
           <div className="mt-6 grid gap-4">
             <div className="grid gap-3 sm:grid-cols-2">
-              <select
-                value={form.type}
-                onChange={(event) => handleFormChange('type', event.target.value)}
-                className="field"
-              >
+              <select value={form.type} onChange={(event) => handleFormChange('type', event.target.value)} className="field">
                 <option value="expense">Expense</option>
                 <option value="income">Income</option>
               </select>
-              <input
-                type="date"
-                value={form.date}
-                onChange={(event) => handleFormChange('date', event.target.value)}
-                className="field"
-                required
-              />
+              <input type="date" value={form.date} onChange={(event) => handleFormChange('date', event.target.value)} className="field" required />
             </div>
 
             <div className="grid gap-3 sm:grid-cols-[1.4fr_1fr]">
@@ -942,20 +1303,142 @@ function TransactionsPage({
               />
             </div>
 
-            <select
-              value={selectedCategoryId}
-              onChange={(event) => handleFormChange('category_id', event.target.value)}
-              className="field"
-              required
-            >
-              {filteredCategories.map((category) => (
-                <option key={category.id} value={category.id}>
-                  {category.emoji} {category.name}
-                </option>
-              ))}
-            </select>
+            {!form.split_enabled && (
+              <select value={selectedCategoryId} onChange={(event) => handleFormChange('category_id', event.target.value)} className="field" required>
+                {filteredCategories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.emoji} {category.name}
+                  </option>
+                ))}
+              </select>
+            )}
 
-            <button type="submit" disabled={saving} className="primary-button">
+            <textarea
+              value={form.notes}
+              onChange={(event) => handleFormChange('notes', event.target.value)}
+              placeholder="Notes (optional)"
+              className="field min-h-24"
+            />
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="flex items-center justify-between rounded-2xl bg-[var(--surface-muted)] px-4 py-3 text-sm text-[var(--text-secondary)]">
+                <span>Recurring</span>
+                <input
+                  type="checkbox"
+                  checked={form.recurring_enabled}
+                  onChange={(event) => handleFormChange('recurring_enabled', event.target.checked)}
+                  disabled={form.split_enabled || Boolean(editingId)}
+                />
+              </label>
+              <label className="flex items-center justify-between rounded-2xl bg-[var(--surface-muted)] px-4 py-3 text-sm text-[var(--text-secondary)]">
+                <span>Split</span>
+                <input
+                  type="checkbox"
+                  checked={form.split_enabled}
+                  onChange={(event) => handleFormChange('split_enabled', event.target.checked)}
+                  disabled={form.recurring_enabled || Boolean(editingId)}
+                />
+              </label>
+            </div>
+
+            {form.recurring_enabled && (
+              <select
+                value={form.recurring_frequency}
+                onChange={(event) => handleFormChange('recurring_frequency', event.target.value)}
+                className="field"
+              >
+                {RECURRING_FREQUENCIES.map((frequency) => (
+                  <option key={frequency} value={frequency}>
+                    {frequency[0].toUpperCase() + frequency.slice(1)}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            {form.split_enabled && (
+              <div className="rounded-3xl bg-[var(--surface-muted)] p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium text-[var(--text-primary)]">Split across categories</p>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setForm((current) => ({
+                        ...current,
+                        splits: [
+                          ...current.splits,
+                          {
+                            category_id: availableSplitCategories[0]?.id ?? '',
+                            amount: '',
+                          },
+                        ],
+                      }))
+                    }
+                    className="text-sm text-[var(--accent-strong)]"
+                  >
+                    Add split
+                  </button>
+                </div>
+
+                <div className="mt-4 space-y-3">
+                  {form.splits.map((split, index) => (
+                    <div key={index} className="grid gap-3 md:grid-cols-[1.4fr_1fr_auto]">
+                      <select
+                        value={split.category_id}
+                        onChange={(event) =>
+                          setForm((current) => ({
+                            ...current,
+                            splits: current.splits.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, category_id: event.target.value } : item,
+                            ),
+                          }))
+                        }
+                        className="field"
+                      >
+                        {availableSplitCategories.map((category) => (
+                          <option key={category.id} value={category.id}>
+                            {category.name}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={split.amount}
+                        onChange={(event) =>
+                          setForm((current) => ({
+                            ...current,
+                            splits: current.splits.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, amount: event.target.value } : item,
+                            ),
+                          }))
+                        }
+                        className="field"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setForm((current) => ({
+                            ...current,
+                            splits: current.splits.filter((_, itemIndex) => itemIndex !== index),
+                          }))
+                        }
+                        className="text-sm text-rose-500"
+                        disabled={form.splits.length <= 2}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <p className={cn('mt-4 text-sm', splitRemaining < 0 ? 'text-rose-500' : 'text-[var(--text-secondary)]')}>
+                  Remaining balance: {formatCurrency(splitRemaining)}
+                </p>
+              </div>
+            )}
+
+            <button type="submit" disabled={saving || (form.split_enabled && Math.abs(splitRemaining) > 0.009)} className="primary-button">
               {saving ? 'Saving...' : editingId ? 'Update transaction' : 'Add transaction'}
             </button>
           </div>
@@ -966,9 +1449,7 @@ function TransactionsPage({
             <div>
               <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">CSV Import</p>
               <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Google Sheets upload</h2>
-              <p className="mt-2 text-sm text-[var(--text-secondary)]">
-                Expected headers: Name, Amount, Category, Date.
-              </p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">Expected headers: Name, Amount, Category, Date.</p>
             </div>
             <label className="inline-flex cursor-pointer items-center rounded-full bg-[var(--accent-soft)] px-4 py-2 text-sm font-medium text-[var(--accent-strong)]">
               Upload CSV
@@ -1085,7 +1566,7 @@ function TransactionsPage({
                               })} (assumed)`
                             : row.rawDate}
                         </td>
-                        <td className="px-3 py-3">{currency(row.amount)}</td>
+                        <td className="px-3 py-3">{formatCurrency(row.amount)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1103,31 +1584,33 @@ function TransactionsPage({
       <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
+            <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Budget Limits</p>
+            <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Current month progress</h2>
+          </div>
+        </div>
+        <div className="mt-6 grid gap-4 md:grid-cols-2">
+          {budgetProgress.length ? (
+            budgetProgress.map((item) => <BudgetProgressRow key={item.categoryId} item={item} formatCurrency={formatCurrency} />)
+          ) : (
+            <p className="text-sm text-[var(--text-secondary)]">Set a monthly cap for an expense category in Settings to track it here.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
             <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Transactions</p>
             <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Search and filter</h2>
           </div>
           <div className="grid w-full gap-3 md:w-auto md:grid-cols-5">
-            <input
-              type="search"
-              value={filters.query}
-              onChange={(event) => setFilters((current) => ({ ...current, query: event.target.value }))}
-              placeholder="Search"
-              className="field"
-            />
-            <select
-              value={filters.type}
-              onChange={(event) => setFilters((current) => ({ ...current, type: event.target.value }))}
-              className="field"
-            >
+            <input type="search" value={filters.query} onChange={(event) => setFilters((current) => ({ ...current, query: event.target.value }))} placeholder="Search" className="field" />
+            <select value={filters.type} onChange={(event) => setFilters((current) => ({ ...current, type: event.target.value }))} className="field">
               <option value="all">All types</option>
               <option value="expense">Expenses</option>
               <option value="income">Income</option>
             </select>
-            <select
-              value={filters.category}
-              onChange={(event) => setFilters((current) => ({ ...current, category: event.target.value }))}
-              className="field"
-            >
+            <select value={filters.category} onChange={(event) => setFilters((current) => ({ ...current, category: event.target.value }))} className="field">
               <option value="all">All categories</option>
               {categories.map((category) => (
                 <option key={category.id} value={category.id}>
@@ -1135,18 +1618,8 @@ function TransactionsPage({
                 </option>
               ))}
             </select>
-            <input
-              type="date"
-              value={filters.startDate}
-              onChange={(event) => setFilters((current) => ({ ...current, startDate: event.target.value }))}
-              className="field"
-            />
-            <input
-              type="date"
-              value={filters.endDate}
-              onChange={(event) => setFilters((current) => ({ ...current, endDate: event.target.value }))}
-              className="field"
-            />
+            <input type="date" value={filters.startDate} onChange={(event) => setFilters((current) => ({ ...current, startDate: event.target.value }))} className="field" />
+            <input type="date" value={filters.endDate} onChange={(event) => setFilters((current) => ({ ...current, endDate: event.target.value }))} className="field" />
           </div>
         </div>
 
@@ -1164,9 +1637,19 @@ function TransactionsPage({
             </thead>
             <tbody>
               {visibleTransactions.map((transaction) => (
-                <tr key={transaction.id} className="border-t border-[var(--border-soft)]">
+                <tr key={transaction.id} className="border-t border-[var(--border-soft)] align-top">
                   <td className="px-4 py-4">{shortDate(transaction.date)}</td>
-                  <td className="px-4 py-4 font-medium text-[var(--text-primary)]">{transaction.description}</td>
+                  <td className="px-4 py-4">
+                    <p className="font-medium text-[var(--text-primary)]">{transaction.description}</p>
+                    {transaction.notes && <p className="mt-1 text-xs text-[var(--text-muted)]">{transaction.notes}</p>}
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {transaction.split_group_id && (
+                        <span className="rounded-full bg-[var(--surface-muted)] px-3 py-1 text-xs text-[var(--text-secondary)]">
+                          Split
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="px-4 py-4">
                     <span className="inline-flex items-center gap-2 rounded-full bg-[var(--surface-muted)] px-3 py-2">
                       <span>{transaction.category?.emoji ?? '•'}</span>
@@ -1176,18 +1659,14 @@ function TransactionsPage({
                   <td className="px-4 py-4 capitalize">{transaction.type}</td>
                   <td className="px-4 py-4 font-semibold text-[var(--text-primary)]">
                     {transaction.type === 'income' ? '+' : '-'}
-                    {currency(transaction.amount)}
+                    {formatCurrency(transaction.amount)}
                   </td>
                   <td className="px-4 py-4">
                     <div className="flex gap-3">
                       <button type="button" onClick={() => startEdit(transaction)} className="text-[var(--accent-strong)]">
                         Edit
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => onDeleteTransaction(transaction.id)}
-                        className="text-rose-500"
-                      >
+                      <button type="button" onClick={() => onDeleteTransaction(transaction.id)} className="text-rose-500">
                         Delete
                       </button>
                     </div>
@@ -1209,7 +1688,127 @@ function TransactionsPage({
   )
 }
 
-function GoalsPage({ goals, onAddContribution, onDeleteGoal, onSaveGoal }) {
+function BillsPage({ bills, categories, formatCurrency, onDeleteBill, onSaveBill }) {
+  const [form, setForm] = useState({
+    name: '',
+    amount: '',
+    due_date: today(),
+    category_id: categories[0]?.id ?? '',
+    paid: false,
+  })
+  const [editingId, setEditingId] = useState(null)
+  const selectedCategoryId = form.category_id || categories[0]?.id || ''
+
+  async function handleSubmit(event) {
+    event.preventDefault()
+    await onSaveBill({ ...form, category_id: selectedCategoryId }, editingId)
+    setEditingId(null)
+    setForm({
+      name: '',
+      amount: '',
+      due_date: today(),
+      category_id: categories[0]?.id ?? '',
+      paid: false,
+    })
+  }
+
+  return (
+    <div className="space-y-6">
+      <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Bills</p>
+        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Upcoming bill tracker</h2>
+        <form onSubmit={handleSubmit} className="mt-6 grid gap-4 lg:grid-cols-[1.2fr_0.8fr_0.8fr_1fr_auto_auto]">
+          <input type="text" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Bill name" className="field" required />
+          <input type="number" min="0" step="0.01" value={form.amount} onChange={(event) => setForm((current) => ({ ...current, amount: event.target.value }))} placeholder="Amount" className="field" required />
+          <input type="date" value={form.due_date} onChange={(event) => setForm((current) => ({ ...current, due_date: event.target.value }))} className="field" required />
+          <select value={selectedCategoryId} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} className="field">
+            {categories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+          <label className="flex items-center justify-center rounded-2xl bg-[var(--surface-muted)] px-4 py-3 text-sm text-[var(--text-secondary)]">
+            <input type="checkbox" checked={form.paid} onChange={(event) => setForm((current) => ({ ...current, paid: event.target.checked }))} />
+            <span className="ml-2">Paid</span>
+          </label>
+          <button type="submit" className="primary-button">
+            {editingId ? 'Update bill' : 'Add bill'}
+          </button>
+        </form>
+      </section>
+
+      <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+        <div className="space-y-4">
+          {bills.map((bill) => {
+            const daysUntilDue = getDaysUntil(bill.due_date)
+            const toneClass =
+              !bill.paid && daysUntilDue < 0
+                ? 'border-rose-300 bg-rose-50 dark:border-rose-900 dark:bg-rose-950/20'
+                : !bill.paid && daysUntilDue <= 7
+                  ? 'border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/20'
+                  : 'border-[var(--border-soft)] bg-[var(--surface-muted)]'
+
+            return (
+              <div key={bill.id} className={cn('rounded-3xl border p-5', toneClass)}>
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-3">
+                      <h3 className="text-lg font-semibold text-[var(--text-primary)]">{bill.name}</h3>
+                      <span className="rounded-full bg-white/70 px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
+                        {bill.paid ? 'Paid' : 'Unpaid'}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                      Due {shortDate(bill.due_date)} • {bill.category?.name ?? 'Uncategorized'}
+                    </p>
+                    {!bill.paid && daysUntilDue < 0 && <p className="mt-2 text-sm text-rose-600">Overdue by {Math.abs(daysUntilDue)} day(s)</p>}
+                    {!bill.paid && daysUntilDue >= 0 && daysUntilDue <= 7 && <p className="mt-2 text-sm text-amber-700">Due within {daysUntilDue} day(s)</p>}
+                  </div>
+                  <div className="text-right">
+                    <p className="text-lg font-semibold text-[var(--text-primary)]">{formatCurrency(bill.amount)}</p>
+                    <div className="mt-3 flex gap-3 text-sm">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingId(bill.id)
+                          setForm({
+                            name: bill.name,
+                            amount: bill.amount,
+                            due_date: bill.due_date,
+                            category_id: bill.category_id,
+                            paid: bill.paid,
+                          })
+                        }}
+                        className="text-[var(--accent-strong)]"
+                      >
+                        Edit
+                      </button>
+                      <button type="button" onClick={() => onSaveBill({ ...bill, paid: !bill.paid }, bill.id)} className="text-[var(--accent-strong)]">
+                        Mark {bill.paid ? 'unpaid' : 'paid'}
+                      </button>
+                      <button type="button" onClick={() => onDeleteBill(bill.id)} className="text-rose-500">
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+
+          {!bills.length && (
+            <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-8 text-center text-[var(--text-secondary)]">
+              Add your first bill to keep upcoming due dates visible.
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onSaveGoal }) {
   const [form, setForm] = useState({ name: '', target_amount: '', current_amount: 0, deadline: '' })
   const [editingId, setEditingId] = useState(null)
   const [contributionDrafts, setContributionDrafts] = useState({})
@@ -1226,34 +1825,11 @@ function GoalsPage({ goals, onAddContribution, onDeleteGoal, onSaveGoal }) {
     <div className="space-y-6">
       <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
         <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Goals</p>
-        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">
-          Savings goals with monthly carry-over
-        </h2>
+        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Savings goals with monthly carry-over</h2>
         <form onSubmit={handleSubmit} className="mt-6 grid gap-4 lg:grid-cols-[1.3fr_1fr_1fr_auto]">
-          <input
-            type="text"
-            placeholder="Goal name"
-            value={form.name}
-            onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
-            className="field"
-            required
-          />
-          <input
-            type="number"
-            min="0"
-            step="0.01"
-            placeholder="Target amount"
-            value={form.target_amount}
-            onChange={(event) => setForm((current) => ({ ...current, target_amount: event.target.value }))}
-            className="field"
-            required
-          />
-          <input
-            type="date"
-            value={form.deadline}
-            onChange={(event) => setForm((current) => ({ ...current, deadline: event.target.value }))}
-            className="field"
-          />
+          <input type="text" placeholder="Goal name" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} className="field" required />
+          <input type="number" min="0" step="0.01" placeholder="Target amount" value={form.target_amount} onChange={(event) => setForm((current) => ({ ...current, target_amount: event.target.value }))} className="field" required />
+          <input type="date" value={form.deadline} onChange={(event) => setForm((current) => ({ ...current, deadline: event.target.value }))} className="field" />
           <button type="submit" className="primary-button">
             {editingId ? 'Update goal' : 'Create goal'}
           </button>
@@ -1271,11 +1847,10 @@ function GoalsPage({ goals, onAddContribution, onDeleteGoal, onSaveGoal }) {
                 <div>
                   <h3 className="text-xl font-semibold text-[var(--text-primary)]">{goal.name}</h3>
                   <p className="mt-2 text-sm text-[var(--text-secondary)]">
-                    {currency(goal.current_amount)} saved of {currency(goal.target_amount)}
+                    {formatCurrency(goal.current_amount)} saved of {formatCurrency(goal.target_amount)}
                   </p>
                   <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                    {currency(Math.max(Number(goal.target_amount) - Number(goal.current_amount), 0))} left •{' '}
-                    {estimateMonthsRemaining(goal)}
+                    {formatCurrency(Math.max(Number(goal.target_amount) - Number(goal.current_amount), 0))} left • {estimateMonthsRemaining(goal)}
                   </p>
                 </div>
                 <div className="flex gap-3 text-sm">
@@ -1343,28 +1918,18 @@ function GoalsPage({ goals, onAddContribution, onDeleteGoal, onSaveGoal }) {
                   }
                   className="field"
                 />
-                <button
-                  type="button"
-                  onClick={() => onAddContribution(goal.id, draft.amount, draft.month, draft.year)}
-                  className="primary-button"
-                >
+                <button type="button" onClick={() => onAddContribution(goal.id, draft.amount, draft.month, draft.year)} className="primary-button">
                   Add contribution
                 </button>
               </div>
 
               <div className="mt-5 space-y-3">
                 {goal.contributions.slice(0, 4).map((entry) => (
-                  <div
-                    key={entry.id}
-                    className="flex items-center justify-between rounded-2xl bg-[var(--surface-muted)] px-4 py-3 text-sm"
-                  >
+                  <div key={entry.id} className="flex items-center justify-between rounded-2xl bg-[var(--surface-muted)] px-4 py-3 text-sm">
                     <span className="text-[var(--text-secondary)]">
-                      {new Date(entry.year, entry.month - 1, 1).toLocaleString('en-US', {
-                        month: 'long',
-                        year: 'numeric',
-                      })}
+                      {new Date(entry.year, entry.month - 1, 1).toLocaleString('en-US', { month: 'long', year: 'numeric' })}
                     </span>
-                    <span className="font-semibold text-[var(--text-primary)]">{currency(entry.amount)}</span>
+                    <span className="font-semibold text-[var(--text-primary)]">{formatCurrency(entry.amount)}</span>
                   </div>
                 ))}
               </div>
@@ -1383,15 +1948,22 @@ function GoalsPage({ goals, onAddContribution, onDeleteGoal, onSaveGoal }) {
 }
 
 function SettingsPage({
+  budgetMap,
   categories,
+  formatCurrency,
   notice,
   onCreateCategory,
   onDeleteCategory,
+  onDeleteRecurring,
+  onExportTransactions,
+  onSaveBudgetLimit,
   onSaveSettings,
+  onToggleRecurring,
   onUpdateCategory,
+  recurringTransactions,
   settings,
 }) {
-  const [draft, setDraft] = useState(settings)
+  const [draft, setDraft] = useState(() => settings)
   const [categoryForm, setCategoryForm] = useState({
     name: '',
     color: '#2563eb',
@@ -1403,9 +1975,9 @@ function SettingsPage({
     <div className="space-y-6">
       <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
         <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Appearance</p>
-        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Theme and accent</h2>
+        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Theme, accent, and currency</h2>
 
-        <div className="mt-6 grid gap-6 lg:grid-cols-2">
+        <div className="mt-6 grid gap-6 lg:grid-cols-3">
           <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
             <p className="text-sm font-medium text-[var(--text-primary)]">Mode</p>
             <div className="mt-4 flex gap-3">
@@ -1416,9 +1988,7 @@ function SettingsPage({
                   onClick={() => setDraft((current) => ({ ...current, theme: mode }))}
                   className={cn(
                     'rounded-full px-4 py-2 text-sm capitalize',
-                    draft.theme === mode
-                      ? 'bg-[var(--accent-soft)] text-[var(--accent-strong)]'
-                      : 'bg-[var(--surface)] text-[var(--text-secondary)]',
+                    draft.theme === mode ? 'bg-[var(--accent-soft)] text-[var(--accent-strong)]' : 'bg-[var(--surface)] text-[var(--text-secondary)]',
                   )}
                 >
                   {mode}
@@ -1435,30 +2005,109 @@ function SettingsPage({
                   key={accent}
                   type="button"
                   onClick={() => setDraft((current) => ({ ...current, accent_color: accent }))}
-                    className={cn(
-                      'flex items-center gap-2 rounded-full px-4 py-2 text-sm capitalize',
-                      draft.accent_color === accent
-                        ? 'bg-[var(--accent-soft)] text-[var(--accent-strong)]'
-                        : 'bg-[var(--surface)] text-[var(--text-secondary)]',
-                    )}
+                  className={cn(
+                    'flex items-center gap-2 rounded-full px-4 py-2 text-sm capitalize',
+                    draft.accent_color === accent
+                      ? 'bg-[var(--accent-soft)] text-[var(--accent-strong)]'
+                      : 'bg-[var(--surface)] text-[var(--text-secondary)]',
+                  )}
                 >
                   <span
                     className="h-3 w-3 rounded-full"
-                    style={{
-                      backgroundColor:
-                        accent === 'blue' ? '#2563eb' : accent === 'green' ? '#16a34a' : '#7c3aed',
-                    }}
+                    style={{ backgroundColor: accent === 'blue' ? '#2563eb' : accent === 'green' ? '#16a34a' : '#7c3aed' }}
                   />
                   {accent}
                 </button>
               ))}
             </div>
           </div>
+
+          <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+            <p className="text-sm font-medium text-[var(--text-primary)]">Currency</p>
+            <select
+              value={draft.currency}
+              onChange={(event) => setDraft((current) => ({ ...current, currency: event.target.value }))}
+              className="field mt-4"
+            >
+              {CURRENCY_OPTIONS.map((option) => (
+                <option key={option.code} value={option.code}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
-        <button type="button" onClick={() => onSaveSettings(draft)} className="primary-button mt-6">
-          Save preferences
-        </button>
+        <div className="mt-6 flex flex-wrap gap-3">
+          <button type="button" onClick={() => onSaveSettings(draft)} className="primary-button">
+            Save preferences
+          </button>
+          <button type="button" onClick={onExportTransactions} className="secondary-button">
+            Export transactions to CSV
+          </button>
+        </div>
+      </section>
+
+      <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Budget Limits</p>
+        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Monthly caps by expense category</h2>
+        <div className="mt-6 space-y-3">
+          {categories
+            .filter((category) => category.type === 'expense')
+            .map((category) => (
+              <div key={category.id} className="grid gap-3 rounded-3xl bg-[var(--surface-muted)] p-4 lg:grid-cols-[1fr_0.8fr_auto]">
+                <div className="flex items-center gap-3">
+                  <span className="text-xl">{category.emoji}</span>
+                  <span className="font-medium text-[var(--text-primary)]">{category.name}</span>
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  defaultValue={budgetMap[category.id] ?? ''}
+                  placeholder="No limit"
+                  className="field"
+                  onBlur={(event) => onSaveBudgetLimit(category.id, event.target.value)}
+                />
+                <div className="flex items-center text-sm text-[var(--text-secondary)]">
+                  {budgetMap[category.id] ? `Cap ${formatCurrency(budgetMap[category.id])}` : 'Optional'}
+                </div>
+              </div>
+            ))}
+        </div>
+      </section>
+
+      <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Recurring</p>
+        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Active recurring transactions</h2>
+        <div className="mt-6 space-y-3">
+          {recurringTransactions.length ? (
+            recurringTransactions.map((item) => (
+              <div key={item.id} className="grid gap-3 rounded-3xl bg-[var(--surface-muted)] p-4 lg:grid-cols-[1.4fr_1fr_1fr_auto_auto]">
+                <div>
+                  <p className="font-medium text-[var(--text-primary)]">{item.description}</p>
+                  <p className="mt-1 text-sm text-[var(--text-secondary)]">{formatCurrency(item.amount)} • {item.frequency}</p>
+                </div>
+                <div className="flex items-center text-sm text-[var(--text-secondary)]">Next {shortDate(item.next_date)}</div>
+                <div className="flex items-center text-sm text-[var(--text-secondary)]">{item.active ? 'Active' : 'Paused'}</div>
+                <button
+                  type="button"
+                  onClick={() => onToggleRecurring(item.id, { active: !item.active })}
+                  className="text-sm text-[var(--accent-strong)]"
+                >
+                  {item.active ? 'Pause' : 'Resume'}
+                </button>
+                <button type="button" onClick={() => onDeleteRecurring(item.id)} className="text-sm text-rose-500">
+                  Delete
+                </button>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-6 text-sm text-[var(--text-secondary)]">
+              Turn on the recurring toggle when adding a transaction to manage it here.
+            </div>
+          )}
+        </div>
       </section>
 
       <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
@@ -1473,35 +2122,13 @@ function SettingsPage({
           }}
           className="mt-6 grid gap-4 lg:grid-cols-[1.4fr_0.8fr_0.8fr_0.8fr_auto]"
         >
-          <input
-            type="text"
-            placeholder="Category name"
-            value={categoryForm.name}
-            onChange={(event) => setCategoryForm((current) => ({ ...current, name: event.target.value }))}
-            className="field"
-            required
-          />
-          <select
-            value={categoryForm.type}
-            onChange={(event) => setCategoryForm((current) => ({ ...current, type: event.target.value }))}
-            className="field"
-          >
+          <input type="text" placeholder="Category name" value={categoryForm.name} onChange={(event) => setCategoryForm((current) => ({ ...current, name: event.target.value }))} className="field" required />
+          <select value={categoryForm.type} onChange={(event) => setCategoryForm((current) => ({ ...current, type: event.target.value }))} className="field">
             <option value="expense">Expense</option>
             <option value="income">Income</option>
           </select>
-          <input
-            type="color"
-            value={categoryForm.color}
-            onChange={(event) => setCategoryForm((current) => ({ ...current, color: event.target.value }))}
-            className="field h-12"
-          />
-          <input
-            type="text"
-            maxLength="2"
-            value={categoryForm.emoji}
-            onChange={(event) => setCategoryForm((current) => ({ ...current, emoji: event.target.value }))}
-            className="field"
-          />
+          <input type="color" value={categoryForm.color} onChange={(event) => setCategoryForm((current) => ({ ...current, color: event.target.value }))} className="field h-12" />
+          <input type="text" maxLength="2" value={categoryForm.emoji} onChange={(event) => setCategoryForm((current) => ({ ...current, emoji: event.target.value }))} className="field" />
           <button type="submit" className="primary-button">
             Add category
           </button>
@@ -1514,10 +2141,7 @@ function SettingsPage({
             )
 
             return (
-              <div
-                key={category.id}
-                className="grid gap-3 rounded-3xl bg-[var(--surface-muted)] p-4 lg:grid-cols-[1.1fr_0.8fr_0.6fr_auto_auto]"
-              >
+              <div key={category.id} className="grid gap-3 rounded-3xl bg-[var(--surface-muted)] p-4 lg:grid-cols-[1.1fr_0.8fr_0.6fr_auto_auto]">
                 <input
                   type="text"
                   defaultValue={category.name}
@@ -1529,19 +2153,8 @@ function SettingsPage({
                   }}
                   className="field"
                 />
-                <input
-                  type="color"
-                  defaultValue={category.color}
-                  onBlur={(event) => onUpdateCategory(category.id, { color: event.target.value })}
-                  className="field h-12"
-                />
-                <input
-                  type="text"
-                  defaultValue={category.emoji}
-                  maxLength="2"
-                  onBlur={(event) => onUpdateCategory(category.id, { emoji: event.target.value })}
-                  className="field"
-                />
+                <input type="color" defaultValue={category.color} onBlur={(event) => onUpdateCategory(category.id, { color: event.target.value })} className="field h-12" />
+                <input type="text" defaultValue={category.emoji} maxLength="2" onBlur={(event) => onUpdateCategory(category.id, { emoji: event.target.value })} className="field" />
                 <div className="flex items-center text-sm capitalize text-[var(--text-secondary)]">{category.type}</div>
                 <button
                   type="button"
@@ -1638,7 +2251,7 @@ function AuthScreen({ notice, onNotice }) {
           </p>
 
           <div className="mt-8 grid gap-4 md:grid-cols-3">
-            <FeatureChip title="Quick add" description="Income and expenses in a few taps." />
+            <FeatureChip title="Quick add" description="Income, bills, budgets, and recurring entries in a few taps." />
             <FeatureChip title="Goal tracking" description="Carry monthly contributions forward." />
             <FeatureChip title="CSV import" description="Preview Google Sheets rows before saving." />
           </div>
@@ -1651,10 +2264,7 @@ function AuthScreen({ notice, onNotice }) {
                 key={value}
                 type="button"
                 onClick={() => setMode(value)}
-                className={cn(
-                  'rounded-full px-4 py-2 capitalize transition',
-                  mode === value ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)]',
-                )}
+                className={cn('rounded-full px-4 py-2 capitalize transition', mode === value ? 'bg-[var(--accent)] text-white' : 'text-[var(--text-secondary)]')}
               >
                 {value.replace('-', ' ')}
               </button>
@@ -1662,22 +2272,8 @@ function AuthScreen({ notice, onNotice }) {
           </div>
 
           <form onSubmit={handlePasswordAuth} className="mt-6 space-y-4">
-            <input
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="Email"
-              className="field"
-              required
-            />
-            <input
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="Password"
-              className="field"
-              required
-            />
+            <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email" className="field" required />
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" className="field" required />
             <button type="submit" disabled={loading} className="primary-button w-full">
               {loading ? 'Working...' : mode === 'sign-in' ? 'Sign in' : 'Create account'}
             </button>
@@ -1729,20 +2325,11 @@ function ResetPasswordScreen({ canReset, notice, onNotice, onBack }) {
         <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Reset password</p>
         <h1 className="mt-3 text-3xl font-semibold tracking-tight text-[var(--text-primary)]">Choose a new password</h1>
         <p className="mt-3 text-sm text-[var(--text-secondary)]">
-          {canReset
-            ? 'Set your new password below.'
-            : 'Open the reset link from your email to create a secure recovery session.'}
+          {canReset ? 'Set your new password below.' : 'Open the reset link from your email to create a secure recovery session.'}
         </p>
 
         <form onSubmit={handleReset} className="mt-6 space-y-4">
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            placeholder="New password"
-            className="field"
-            required
-          />
+          <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="New password" className="field" required />
           <button type="submit" disabled={!canReset || loading} className="primary-button w-full">
             {loading ? 'Updating...' : 'Update password'}
           </button>
@@ -1789,6 +2376,43 @@ function ChartCard({ children, subtitle, title }) {
   )
 }
 
+function BudgetProgressRow({ item, formatCurrency }) {
+  const toneClass =
+    item.status === 'over'
+      ? 'bg-rose-500'
+      : item.status === 'warning'
+        ? 'bg-amber-500'
+        : 'bg-[var(--accent)]'
+
+  return (
+    <div className="rounded-3xl bg-[var(--surface-muted)] p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="font-medium text-[var(--text-primary)]">{item.name}</p>
+          <p className="mt-1 text-sm text-[var(--text-secondary)]">
+            {formatCurrency(item.spent)} of {formatCurrency(item.limit)}
+          </p>
+        </div>
+        <span
+          className={cn(
+            'rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.2em]',
+            item.status === 'over'
+              ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/30 dark:text-rose-300'
+              : item.status === 'warning'
+                ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300'
+                : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300',
+          )}
+        >
+          {item.status === 'over' ? 'Over' : item.status === 'warning' ? '80%' : 'On track'}
+        </span>
+      </div>
+      <div className="mt-3 h-2 rounded-full bg-[var(--border-soft)]">
+        <div className={cn('h-2 rounded-full', toneClass)} style={{ width: `${Math.min(item.percent, 100)}%` }} />
+      </div>
+    </div>
+  )
+}
+
 function LoadingScreen() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-[var(--bg-app)]">
@@ -1797,6 +2421,60 @@ function LoadingScreen() {
       </div>
     </div>
   )
+}
+
+function buildTransactionForm(categories) {
+  return {
+    date: today(),
+    amount: '',
+    type: 'expense',
+    category_id: categories.find((category) => category.type === 'expense')?.id ?? '',
+    description: '',
+    notes: '',
+    recurring_enabled: false,
+    recurring_frequency: 'monthly',
+    split_enabled: false,
+    splits: [
+      { category_id: categories.find((category) => category.type === 'expense')?.id ?? '', amount: '' },
+      { category_id: categories.find((category) => category.type === 'expense')?.id ?? '', amount: '' },
+    ],
+  }
+}
+
+async function generateDueRecurringTransactions(recurringTransactions, userId) {
+  const todayValue = today()
+
+  for (const recurring of recurringTransactions.filter((item) => item.active)) {
+    let nextDate = recurring.next_date
+    const rows = []
+
+    while (nextDate && compareDateOnly(nextDate, todayValue) <= 0) {
+      rows.push({
+        user_id: userId,
+        date: nextDate,
+        amount: Number(recurring.amount),
+        type: recurring.type,
+        category_id: recurring.category_id,
+        description: recurring.description,
+        notes: null,
+        split_group_id: null,
+      })
+      nextDate = addRecurringInterval(nextDate, recurring.frequency)
+    }
+
+    if (rows.length) {
+      const { error: insertError } = await supabase.from('transactions').insert(rows)
+      if (insertError) throw insertError
+
+      const { error: updateError } = await supabase
+        .from('recurring_transactions')
+        .update({ next_date: nextDate })
+        .eq('id', recurring.id)
+        .eq('user_id', userId)
+
+      if (updateError) throw updateError
+    }
+  }
 }
 
 async function ensureCategories(userId) {
@@ -1821,7 +2499,7 @@ async function ensureCategories(userId) {
 async function ensureSettings(userId) {
   const { data, error } = await supabase
     .from('settings')
-    .select('id, user_id, theme, accent_color')
+    .select('id, user_id, theme, accent_color, currency')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -1831,20 +2509,24 @@ async function ensureSettings(userId) {
   const { data: inserted, error: insertError } = await supabase
     .from('settings')
     .insert({ user_id: userId, ...DEFAULT_THEME })
-    .select('id, user_id, theme, accent_color')
+    .select('id, user_id, theme, accent_color, currency')
     .single()
 
   if (insertError) throw insertError
   return inserted
 }
 
-function buildDashboardData(transactions) {
+function buildDashboardData(transactions, budgetMap, goals, categoryMap) {
   const now = new Date()
   const monthStart = toDateInputValue(startOfMonth(now))
   const monthEnd = toDateInputValue(new Date(now.getFullYear(), now.getMonth() + 1, 0))
-  const monthTransactions = transactions.filter(
-    (transaction) => transaction.date >= monthStart && transaction.date <= monthEnd,
+  const previousMonthStart = toDateInputValue(new Date(now.getFullYear(), now.getMonth() - 1, 1))
+  const previousMonthEnd = toDateInputValue(new Date(now.getFullYear(), now.getMonth(), 0))
+  const monthTransactions = transactions.filter((transaction) => transaction.date >= monthStart && transaction.date <= monthEnd)
+  const previousMonthTransactions = transactions.filter(
+    (transaction) => transaction.date >= previousMonthStart && transaction.date <= previousMonthEnd,
   )
+
   const monthlyIncome = monthTransactions
     .filter((transaction) => transaction.type === 'income')
     .reduce((sum, transaction) => sum + Number(transaction.amount), 0)
@@ -1852,13 +2534,13 @@ function buildDashboardData(transactions) {
     .filter((transaction) => transaction.type === 'expense')
     .reduce((sum, transaction) => sum + Number(transaction.amount), 0)
 
+  const allTimeIncome = transactions.filter((transaction) => transaction.type === 'income').reduce((sum, transaction) => sum + Number(transaction.amount), 0)
+  const allTimeExpenses = transactions.filter((transaction) => transaction.type === 'expense').reduce((sum, transaction) => sum + Number(transaction.amount), 0)
+
   const weeks = buildMonthWeeks(now)
   const weeklyTotals = weeks.map((week) => {
     const total = monthTransactions
-      .filter(
-        (transaction) =>
-          transaction.type === 'expense' && transaction.date >= week.start && transaction.date <= week.end,
-      )
+      .filter((transaction) => transaction.type === 'expense' && transaction.date >= week.start && transaction.date <= week.end)
       .reduce((sum, transaction) => sum + Number(transaction.amount), 0)
 
     return { ...week, total }
@@ -1871,22 +2553,22 @@ function buildDashboardData(transactions) {
     percent: Math.max((week.total / maxWeekly) * 100, week.total ? 8 : 0),
   }))
 
-  const categoryMap = new Map()
+  const categorySpendingMap = new Map()
   monthTransactions
     .filter((transaction) => transaction.type === 'expense')
     .forEach((transaction) => {
       const key = slugKey(transaction.category?.name ?? 'Uncategorized')
-      const current = categoryMap.get(key) ?? {
+      const current = categorySpendingMap.get(key) ?? {
         name: transaction.category?.name ?? 'Uncategorized',
         value: 0,
         color: transaction.category?.color ?? '#64748b',
       }
       current.value += Number(transaction.amount)
-      categoryMap.set(key, current)
+      categorySpendingMap.set(key, current)
     })
 
   const runningSeries = [...transactions]
-    .sort((a, b) => a.date.localeCompare(b.date))
+    .sort((left, right) => left.date.localeCompare(right.date))
     .reduce((series, transaction) => {
       const previousBalance = series.at(-1)?.balance ?? 0
       const delta = transaction.type === 'income' ? Number(transaction.amount) : -Number(transaction.amount)
@@ -1897,6 +2579,59 @@ function buildDashboardData(transactions) {
       return series
     }, [])
 
+  const budgetProgress = Object.entries(budgetMap)
+    .map(([categoryId, limit]) => {
+      const spent = monthTransactions
+        .filter((transaction) => transaction.type === 'expense' && transaction.category_id === categoryId)
+        .reduce((sum, transaction) => sum + Number(transaction.amount), 0)
+      const percent = limit ? (spent / limit) * 100 : 0
+      return {
+        categoryId,
+        name: categoryMap[categoryId]?.name ?? 'Unknown',
+        spent,
+        limit,
+        percent,
+        status: spent > limit ? 'over' : spent >= limit * 0.8 ? 'warning' : 'safe',
+      }
+    })
+    .sort((left, right) => right.percent - left.percent)
+
+  const overBudgetCategories = budgetProgress.filter((item) => item.limit && item.spent > item.limit)
+
+  const monthSeries = []
+  const monthlyChangeMap = new Map()
+  transactions.forEach((transaction) => {
+    const transactionDate = new Date(`${transaction.date}T00:00:00`)
+    const key = `${transactionDate.getFullYear()}-${String(transactionDate.getMonth() + 1).padStart(2, '0')}`
+    const delta = transaction.type === 'income' ? Number(transaction.amount) : -Number(transaction.amount)
+    monthlyChangeMap.set(key, (monthlyChangeMap.get(key) ?? 0) + delta)
+  })
+
+  let cumulativeBalance = 0
+  const oldestTrackedMonth = new Date(now.getFullYear(), now.getMonth() - 11, 1)
+  transactions
+    .filter((transaction) => new Date(`${transaction.date}T00:00:00`) < oldestTrackedMonth)
+    .forEach((transaction) => {
+      cumulativeBalance += transaction.type === 'income' ? Number(transaction.amount) : -Number(transaction.amount)
+    })
+
+  for (let offset = 11; offset >= 0; offset -= 1) {
+    const date = new Date(now.getFullYear(), now.getMonth() - offset, 1)
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+    cumulativeBalance += monthlyChangeMap.get(key) ?? 0
+    monthSeries.push({
+      label: date.toLocaleString('en-US', { month: 'short' }),
+      value: cumulativeBalance,
+    })
+  }
+
+  const insights = buildInsights({
+    categoryMap,
+    goals,
+    monthTransactions,
+    previousMonthTransactions,
+  })
+
   return {
     monthlyIncome,
     monthlyExpenses,
@@ -1904,9 +2639,79 @@ function buildDashboardData(transactions) {
     runningBalance: runningSeries.at(-1)?.balance ?? 0,
     weeklyRecap,
     weeklyBar: weeklyTotals,
-    categorySpending: [...categoryMap.values()],
+    categorySpending: [...categorySpendingMap.values()],
     runningSeries,
+    budgetProgress,
+    overBudgetCategories,
+    netWorth: allTimeIncome - allTimeExpenses,
+    netWorthHistory: monthSeries,
+    insights,
   }
+}
+
+function buildInsights({ categoryMap, goals, monthTransactions, previousMonthTransactions }) {
+  const insights = []
+
+  const currentCategorySpend = summarizeExpenseCategories(monthTransactions, categoryMap)
+  const previousCategorySpend = summarizeExpenseCategories(previousMonthTransactions, categoryMap)
+  const sortedCurrent = [...currentCategorySpend.values()].sort((left, right) => right.amount - left.amount)
+  const biggestExpense = sortedCurrent[0]
+
+  if (biggestExpense) {
+    insights.push({
+      title: 'Top category this month',
+      body: `${biggestExpense.name} is your biggest expense this month at ${currency(biggestExpense.amount)}.`,
+    })
+  }
+
+  const comparisons = []
+  currentCategorySpend.forEach((item, key) => {
+    const previous = previousCategorySpend.get(key)?.amount ?? 0
+    if (previous > 0) {
+      const diffPercent = ((item.amount - previous) / previous) * 100
+      comparisons.push({ ...item, diffPercent })
+    }
+  })
+
+  const biggestChange = comparisons.sort((left, right) => Math.abs(right.diffPercent) - Math.abs(left.diffPercent))[0]
+  if (biggestChange) {
+    insights.push({
+      title: 'Month-over-month shift',
+      body: `You spent ${Math.abs(biggestChange.diffPercent).toFixed(0)}% ${biggestChange.diffPercent < 0 ? 'less' : 'more'} on ${biggestChange.name} this month versus last month.`,
+    })
+  }
+
+  const goal = [...goals]
+    .map((item) => ({
+      ...item,
+      progress: Number(item.target_amount) ? (Number(item.current_amount || 0) / Number(item.target_amount)) * 100 : 0,
+    }))
+    .sort((left, right) => right.progress - left.progress)[0]
+
+  if (goal) {
+    insights.push({
+      title: 'Goal momentum',
+      body: `You are ${Math.min(goal.progress, 100).toFixed(0)}% of the way to your ${goal.name} goal.`,
+    })
+  }
+
+  return insights.slice(0, 3)
+}
+
+function summarizeExpenseCategories(transactions, categoryMap) {
+  const map = new Map()
+  transactions
+    .filter((transaction) => transaction.type === 'expense')
+    .forEach((transaction) => {
+      const key = transaction.category_id || 'uncategorized'
+      const current = map.get(key) ?? {
+        name: categoryMap[transaction.category_id]?.name ?? transaction.category?.name ?? 'Uncategorized',
+        amount: 0,
+      }
+      current.amount += Number(transaction.amount)
+      map.set(key, current)
+    })
+  return map
 }
 
 function enrichGoals(goals, contributions) {

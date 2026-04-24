@@ -16,9 +16,20 @@ export const DEFAULT_CATEGORIES = [
 
 export const ACCENT_OPTIONS = ['blue', 'green', 'purple']
 
+export const CURRENCY_OPTIONS = [
+  { code: 'CAD', label: 'CAD ($)' },
+  { code: 'USD', label: 'USD ($)' },
+  { code: 'AUD', label: 'AUD ($)' },
+  { code: 'EUR', label: 'EUR (€)' },
+  { code: 'GBP', label: 'GBP (£)' },
+]
+
+export const RECURRING_FREQUENCIES = ['daily', 'weekly', 'monthly']
+
 export const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'transactions', label: 'Transactions' },
+  { id: 'bills', label: 'Bills' },
   { id: 'goals', label: 'Goals' },
   { id: 'settings', label: 'Settings' },
 ]
