@@ -77,6 +77,11 @@ textarea {
   box-shadow: 0 0 0 4px var(--accent-soft);
 }
 
+.select-field {
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
 .primary-button,
 .secondary-button {
   display: inline-flex;

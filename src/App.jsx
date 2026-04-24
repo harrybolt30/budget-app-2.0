@@ -43,7 +43,13 @@ import {
   toDateInputValue,
 } from './lib/utils'
 
-const DEFAULT_THEME = { theme: 'light', accent_color: 'blue', currency: 'CAD' }
+const DEFAULT_THEME = {
+  theme: 'light',
+  accent_color: 'blue',
+  currency: 'CAD',
+  sidebar_title: 'Your money, in motion.',
+  sidebar_description: 'Track spending, protect goals, stay ahead of bills, and keep your monthly plan simple.',
+}
 
 function App() {
   const location = useLocation()
@@ -557,6 +563,8 @@ function BudgetApp({ user, notice, onNotice }) {
         theme: nextSettings.theme,
         accent_color: nextSettings.accent_color,
         currency: nextSettings.currency,
+        sidebar_title: nextSettings.sidebar_title,
+        sidebar_description: nextSettings.sidebar_description,
       }
 
       const { error } = await supabase.from('settings').upsert(payload, { onConflict: 'user_id' })
@@ -837,7 +845,7 @@ function BudgetApp({ user, notice, onNotice }) {
       )}
 
       <div className="mx-auto flex min-h-screen max-w-7xl flex-col md:flex-row">
-        <Sidebar activeView={activeView} onChange={setActiveView} user={user} />
+        <Sidebar activeView={activeView} onChange={setActiveView} settings={settings} user={user} />
         <main className="flex-1 px-4 pb-28 pt-6 md:px-8 md:pb-8 md:pt-8">
           {notice && (
             <div className="mb-4 rounded-2xl border border-[var(--border-soft)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--text-secondary)] shadow-soft">
@@ -852,39 +860,45 @@ function BudgetApp({ user, notice, onNotice }) {
   )
 }
 
-function Sidebar({ activeView, onChange, user }) {
+function Sidebar({ activeView, onChange, settings, user }) {
   return (
-    <aside className="hidden w-72 shrink-0 border-r border-[var(--border-soft)] bg-[linear-gradient(180deg,var(--surface),rgba(255,255,255,0.3))] px-5 py-6 md:flex md:flex-col">
-      <div className="mb-8">
-        <p className="text-xs uppercase tracking-[0.35em] text-[var(--text-muted)]">Budget Flow</p>
-        <h1 className="mt-3 text-3xl font-semibold tracking-tight text-[var(--text-primary)]">Your money, in motion.</h1>
-        <p className="mt-3 text-sm text-[var(--text-secondary)]">
-          Track spending, protect goals, stay ahead of bills, and keep your monthly plan simple.
-        </p>
-      </div>
+    <aside className="hidden w-80 shrink-0 px-5 py-6 md:block">
+      <div className="sticky top-6 space-y-4">
+        <div className="rounded-[2rem] border border-[var(--border-soft)] bg-[linear-gradient(180deg,var(--surface),rgba(255,255,255,0.55))] p-5 shadow-soft dark:bg-[linear-gradient(180deg,rgba(15,23,42,0.92),rgba(15,23,42,0.76))]">
+          <div className="mb-8">
+            <p className="text-xs uppercase tracking-[0.35em] text-[var(--text-muted)]">Budget Flow</p>
+            <h1 className="mt-3 text-3xl font-semibold tracking-tight text-[var(--text-primary)]">
+              {settings.sidebar_title || DEFAULT_THEME.sidebar_title}
+            </h1>
+            <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
+              {settings.sidebar_description || DEFAULT_THEME.sidebar_description}
+            </p>
+          </div>
 
-      <nav className="space-y-2">
-        {NAV_ITEMS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => onChange(item.id)}
-            className={cn(
-              'flex w-full items-center justify-between rounded-2xl px-4 py-3 text-left text-sm font-medium transition',
-              activeView === item.id
-                ? 'bg-[var(--accent-soft)] text-[var(--accent-strong)]'
-                : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]',
-            )}
-          >
-            <span>{item.label}</span>
-            <span className="text-xs uppercase tracking-[0.3em]">{item.id.slice(0, 2)}</span>
-          </button>
-        ))}
-      </nav>
+          <nav className="space-y-2">
+            {NAV_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onChange(item.id)}
+                className={cn(
+                  'flex w-full items-center justify-between rounded-2xl px-4 py-3 text-left text-sm font-medium transition',
+                  activeView === item.id
+                    ? 'bg-[var(--accent-soft)] text-[var(--accent-strong)]'
+                    : 'text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]',
+                )}
+              >
+                <span>{item.label}</span>
+                <span className="text-xs uppercase tracking-[0.3em]">{item.id.slice(0, 2)}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
 
-      <div className="mt-auto rounded-3xl border border-[var(--border-soft)] bg-[var(--surface)] p-4 shadow-soft">
-        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Signed in</p>
-        <p className="mt-2 text-sm font-medium text-[var(--text-primary)]">{user.email}</p>
+        <div className="rounded-[1.75rem] border border-[var(--border-soft)] bg-[var(--surface)] p-4 shadow-soft">
+          <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Signed in</p>
+          <p className="mt-2 break-words text-sm font-medium text-[var(--text-primary)]">{user.email}</p>
+        </div>
       </div>
     </aside>
   )
@@ -957,12 +971,12 @@ function DashboardPage({
               <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Monthly Summary</p>
               <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">{monthLabel()}</h2>
             </div>
-            <div className="rounded-full bg-[var(--surface-muted)] px-4 py-2 text-sm text-[var(--text-secondary)]">
+            <div className="max-w-full rounded-full bg-[var(--surface-muted)] px-4 py-2 text-sm text-[var(--text-secondary)] md:max-w-[18rem]">
               Running balance {formatCurrency(dashboardData.runningBalance)}
             </div>
           </div>
 
-          <div className="mt-6 grid gap-4 sm:grid-cols-4">
+          <div className="mt-6 grid gap-4 sm:grid-cols-2 2xl:grid-cols-4">
             <SummaryCard label="Income" value={formatCurrency(dashboardData.monthlyIncome)} tone="positive" />
             <SummaryCard label="Expenses" value={formatCurrency(dashboardData.monthlyExpenses)} tone="negative" />
             <SummaryCard label="Net" value={formatCurrency(dashboardData.netBalance)} tone="neutral" />
@@ -975,9 +989,9 @@ function DashboardPage({
           <div className="mt-4 space-y-4">
             {dashboardData.weeklyRecap.map((week) => (
               <div key={week.label} className="rounded-2xl bg-[var(--surface-muted)] p-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-[var(--text-primary)]">{week.label}</span>
-                  <span className="text-sm text-[var(--text-secondary)]">{formatCurrency(week.total)}</span>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="min-w-0 text-sm font-medium text-[var(--text-primary)]">{week.label}</span>
+                  <span className="text-right text-sm text-[var(--text-secondary)]">{formatCurrency(week.total)}</span>
                 </div>
                 <div className="mt-3 h-2 rounded-full bg-[var(--border-soft)]">
                   <div className="h-2 rounded-full bg-[var(--accent)]" style={{ width: `${week.percent}%` }} />
@@ -1115,6 +1129,7 @@ function TransactionsPage({
   saving,
   transactions,
 }) {
+  const pageSize = 10
   const [filters, setFilters] = useState({
     query: '',
     type: 'all',
@@ -1123,6 +1138,7 @@ function TransactionsPage({
     endDate: '',
   })
   const [editingId, setEditingId] = useState(null)
+  const [pageInput, setPageInput] = useState(1)
   const [form, setForm] = useState(buildTransactionForm(categories))
   const [importState, setImportState] = useState({
     rows: [],
@@ -1130,9 +1146,10 @@ function TransactionsPage({
     assumedYear: new Date().getFullYear(),
   })
 
-  const filteredCategories = categories.filter((category) => category.type === form.type)
+  const visibleCategories = useMemo(() => dedupeCategories(categories), [categories])
+  const filteredCategories = visibleCategories.filter((category) => category.type === form.type)
   const selectedCategoryId = form.category_id || filteredCategories[0]?.id || ''
-  const availableSplitCategories = categories.filter((category) => category.type === form.type)
+  const availableSplitCategories = visibleCategories.filter((category) => category.type === form.type)
   const splitTotal = form.splits.reduce((sum, split) => sum + Number(split.amount || 0), 0)
   const splitRemaining = Number(form.amount || 0) - splitTotal
 
@@ -1153,6 +1170,9 @@ function TransactionsPage({
       return true
     })
   }, [filters, transactions])
+  const totalPages = Math.max(Math.ceil(visibleTransactions.length / pageSize), 1)
+  const currentPage = Math.min(Math.max(pageInput, 1), totalPages)
+  const paginatedTransactions = visibleTransactions.slice((currentPage - 1) * pageSize, currentPage * pageSize)
 
   function handleFormChange(field, value) {
     setForm((current) => {
@@ -1275,7 +1295,7 @@ function TransactionsPage({
 
           <div className="mt-6 grid gap-4">
             <div className="grid gap-3 sm:grid-cols-2">
-              <select value={form.type} onChange={(event) => handleFormChange('type', event.target.value)} className="field">
+              <select value={form.type} onChange={(event) => handleFormChange('type', event.target.value)} className="field select-field">
                 <option value="expense">Expense</option>
                 <option value="income">Income</option>
               </select>
@@ -1304,7 +1324,7 @@ function TransactionsPage({
             </div>
 
             {!form.split_enabled && (
-              <select value={selectedCategoryId} onChange={(event) => handleFormChange('category_id', event.target.value)} className="field" required>
+              <select value={selectedCategoryId} onChange={(event) => handleFormChange('category_id', event.target.value)} className="field select-field" required>
                 {filteredCategories.map((category) => (
                   <option key={category.id} value={category.id}>
                     {category.emoji} {category.name}
@@ -1345,7 +1365,7 @@ function TransactionsPage({
               <select
                 value={form.recurring_frequency}
                 onChange={(event) => handleFormChange('recurring_frequency', event.target.value)}
-                className="field"
+                className="field select-field"
               >
                 {RECURRING_FREQUENCIES.map((frequency) => (
                   <option key={frequency} value={frequency}>
@@ -1392,7 +1412,7 @@ function TransactionsPage({
                             ),
                           }))
                         }
-                        className="field"
+                        className="field select-field"
                       >
                         {availableSplitCategories.map((category) => (
                           <option key={category.id} value={category.id}>
@@ -1549,7 +1569,7 @@ function TransactionsPage({
                                 ),
                               }))
                             }
-                            className="field"
+                            className="field select-field"
                           >
                             <option value="expense">Expense</option>
                             <option value="income">Income</option>
@@ -1604,22 +1624,37 @@ function TransactionsPage({
             <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Search and filter</h2>
           </div>
           <div className="grid w-full gap-3 md:w-auto md:grid-cols-5">
-            <input type="search" value={filters.query} onChange={(event) => setFilters((current) => ({ ...current, query: event.target.value }))} placeholder="Search" className="field" />
-            <select value={filters.type} onChange={(event) => setFilters((current) => ({ ...current, type: event.target.value }))} className="field">
+            <input type="search" value={filters.query} onChange={(event) => {
+              setFilters((current) => ({ ...current, query: event.target.value }))
+              setPageInput(1)
+            }} placeholder="Search" className="field" />
+            <select value={filters.type} onChange={(event) => {
+              setFilters((current) => ({ ...current, type: event.target.value }))
+              setPageInput(1)
+            }} className="field">
               <option value="all">All types</option>
               <option value="expense">Expenses</option>
               <option value="income">Income</option>
             </select>
-            <select value={filters.category} onChange={(event) => setFilters((current) => ({ ...current, category: event.target.value }))} className="field">
+            <select value={filters.category} onChange={(event) => {
+              setFilters((current) => ({ ...current, category: event.target.value }))
+              setPageInput(1)
+            }} className="field select-field">
               <option value="all">All categories</option>
-              {categories.map((category) => (
+              {visibleCategories.map((category) => (
                 <option key={category.id} value={category.id}>
                   {category.name}
                 </option>
               ))}
             </select>
-            <input type="date" value={filters.startDate} onChange={(event) => setFilters((current) => ({ ...current, startDate: event.target.value }))} className="field" />
-            <input type="date" value={filters.endDate} onChange={(event) => setFilters((current) => ({ ...current, endDate: event.target.value }))} className="field" />
+            <input type="date" value={filters.startDate} onChange={(event) => {
+              setFilters((current) => ({ ...current, startDate: event.target.value }))
+              setPageInput(1)
+            }} className="field" />
+            <input type="date" value={filters.endDate} onChange={(event) => {
+              setFilters((current) => ({ ...current, endDate: event.target.value }))
+              setPageInput(1)
+            }} className="field" />
           </div>
         </div>
 
@@ -1636,7 +1671,7 @@ function TransactionsPage({
               </tr>
             </thead>
             <tbody>
-              {visibleTransactions.map((transaction) => (
+              {paginatedTransactions.map((transaction) => (
                 <tr key={transaction.id} className="border-t border-[var(--border-soft)] align-top">
                   <td className="px-4 py-4">{shortDate(transaction.date)}</td>
                   <td className="px-4 py-4">
@@ -1683,33 +1718,63 @@ function TransactionsPage({
             </tbody>
           </table>
         </div>
+
+        {visibleTransactions.length > 0 && (
+          <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-[var(--text-secondary)]">
+              Showing {(currentPage - 1) * pageSize + 1}-{Math.min(currentPage * pageSize, visibleTransactions.length)} of {visibleTransactions.length}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPageInput((page) => Math.max(page - 1, 1))}
+                disabled={currentPage === 1}
+                className="secondary-button px-4 py-2 disabled:opacity-50"
+              >
+                Previous
+              </button>
+              <span className="rounded-full bg-[var(--surface-muted)] px-4 py-2 text-sm text-[var(--text-secondary)]">
+                Page {currentPage} of {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setPageInput((page) => Math.min(page + 1, totalPages))}
+                disabled={currentPage === totalPages}
+                className="secondary-button px-4 py-2 disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </section>
     </div>
   )
 }
 
 function BillsPage({ bills, categories, formatCurrency, onDeleteBill, onSaveBill }) {
+  const visibleCategories = useMemo(() => dedupeCategories(categories), [categories])
   const [form, setForm] = useState({
     name: '',
     amount: '',
     due_date: today(),
-    category_id: categories[0]?.id ?? '',
+    category_id: visibleCategories[0]?.id ?? '',
     paid: false,
   })
   const [editingId, setEditingId] = useState(null)
-  const selectedCategoryId = form.category_id || categories[0]?.id || ''
+  const selectedCategoryId = form.category_id || visibleCategories[0]?.id || ''
 
   async function handleSubmit(event) {
     event.preventDefault()
     await onSaveBill({ ...form, category_id: selectedCategoryId }, editingId)
     setEditingId(null)
-    setForm({
-      name: '',
-      amount: '',
-      due_date: today(),
-      category_id: categories[0]?.id ?? '',
-      paid: false,
-    })
+      setForm({
+        name: '',
+        amount: '',
+        due_date: today(),
+        category_id: visibleCategories[0]?.id ?? '',
+        paid: false,
+      })
   }
 
   return (
@@ -1721,8 +1786,8 @@ function BillsPage({ bills, categories, formatCurrency, onDeleteBill, onSaveBill
           <input type="text" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Bill name" className="field" required />
           <input type="number" min="0" step="0.01" value={form.amount} onChange={(event) => setForm((current) => ({ ...current, amount: event.target.value }))} placeholder="Amount" className="field" required />
           <input type="date" value={form.due_date} onChange={(event) => setForm((current) => ({ ...current, due_date: event.target.value }))} className="field" required />
-          <select value={selectedCategoryId} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} className="field">
-            {categories.map((category) => (
+          <select value={selectedCategoryId} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} className="field select-field">
+            {visibleCategories.map((category) => (
               <option key={category.id} value={category.id}>
                 {category.name}
               </option>
@@ -2061,9 +2126,9 @@ function SettingsPage({
                     'rounded-full px-4 py-2 text-sm capitalize',
                     draft.theme === mode ? 'bg-[var(--accent-soft)] text-[var(--accent-strong)]' : 'bg-[var(--surface)] text-[var(--text-secondary)]',
                   )}
-                >
-                  {mode}
-                </button>
+                    >
+                      {mode}
+                    </button>
               ))}
             </div>
           </div>
@@ -2098,7 +2163,7 @@ function SettingsPage({
             <select
               value={draft.currency}
               onChange={(event) => setDraft((current) => ({ ...current, currency: event.target.value }))}
-              className="field mt-4"
+              className="field select-field mt-4"
             >
               {CURRENCY_OPTIONS.map((option) => (
                 <option key={option.code} value={option.code}>
@@ -2116,6 +2181,29 @@ function SettingsPage({
           <button type="button" onClick={onExportTransactions} className="secondary-button">
             Export transactions to CSV
           </button>
+        </div>
+      </section>
+
+      <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Sidebar Copy</p>
+        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Edit the left sidebar text</h2>
+        <div className="mt-6 grid gap-4">
+          <input
+            type="text"
+            value={draft.sidebar_title ?? ''}
+            onChange={(event) => setDraft((current) => ({ ...current, sidebar_title: event.target.value }))}
+            placeholder="Sidebar title"
+            className="field"
+          />
+          <textarea
+            value={draft.sidebar_description ?? ''}
+            onChange={(event) => setDraft((current) => ({ ...current, sidebar_description: event.target.value }))}
+            placeholder="Sidebar description"
+            className="field min-h-28"
+          />
+          <div className="text-sm text-[var(--text-secondary)]">
+            Update the headline and supporting text shown in the desktop left bar, then save preferences.
+          </div>
         </div>
       </section>
 
@@ -2192,7 +2280,7 @@ function SettingsPage({
           className="mt-6 grid gap-4 lg:grid-cols-[1.4fr_0.8fr_0.8fr_0.8fr_auto]"
         >
           <input type="text" placeholder="Category name" value={categoryForm.name} onChange={(event) => setCategoryForm((current) => ({ ...current, name: event.target.value }))} className="field" required />
-          <select value={categoryForm.type} onChange={(event) => setCategoryForm((current) => ({ ...current, type: event.target.value }))} className="field">
+          <select value={categoryForm.type} onChange={(event) => setCategoryForm((current) => ({ ...current, type: event.target.value }))} className="field select-field">
             <option value="expense">Expense</option>
             <option value="income">Income</option>
           </select>
@@ -2419,9 +2507,9 @@ function SummaryCard({ label, tone, value }) {
         : 'bg-[var(--surface-muted)] text-[var(--text-primary)]'
 
   return (
-    <div className={cn('rounded-3xl p-5', toneClass)}>
+    <div className={cn('min-w-0 rounded-3xl p-5', toneClass)}>
       <p className="text-xs uppercase tracking-[0.3em]">{label}</p>
-      <p className="mt-4 text-2xl font-semibold">{value}</p>
+      <p className="mt-4 break-words text-xl font-semibold leading-tight md:text-2xl">{value}</p>
     </div>
   )
 }
@@ -2456,7 +2544,7 @@ function BudgetProgressRow({ item, formatCurrency }) {
   return (
     <div className="rounded-3xl bg-[var(--surface-muted)] p-4">
       <div className="flex items-center justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <p className="font-medium text-[var(--text-primary)]">{item.name}</p>
           <p className="mt-1 text-sm text-[var(--text-secondary)]">
             {formatCurrency(item.spent)} of {formatCurrency(item.limit)}
@@ -2493,21 +2581,36 @@ function LoadingScreen() {
 }
 
 function buildTransactionForm(categories) {
+  const visibleCategories = dedupeCategories(categories)
   return {
     date: today(),
     amount: '',
     type: 'expense',
-    category_id: categories.find((category) => category.type === 'expense')?.id ?? '',
+    category_id: visibleCategories.find((category) => category.type === 'expense')?.id ?? '',
     description: '',
     notes: '',
     recurring_enabled: false,
     recurring_frequency: 'monthly',
     split_enabled: false,
     splits: [
-      { category_id: categories.find((category) => category.type === 'expense')?.id ?? '', amount: '' },
-      { category_id: categories.find((category) => category.type === 'expense')?.id ?? '', amount: '' },
+      { category_id: visibleCategories.find((category) => category.type === 'expense')?.id ?? '', amount: '' },
+      { category_id: visibleCategories.find((category) => category.type === 'expense')?.id ?? '', amount: '' },
     ],
   }
+}
+
+function dedupeCategories(categories) {
+  const seen = new Set()
+
+  return categories.filter((category) => {
+    const key = `${category.type}:${normalizeText(category.name)}`
+    if (seen.has(key)) {
+      return false
+    }
+
+    seen.add(key)
+    return true
+  })
 }
 
 async function generateDueRecurringTransactions(recurringTransactions, userId) {
@@ -2568,7 +2671,7 @@ async function ensureCategories(userId) {
 async function ensureSettings(userId) {
   const { data, error } = await supabase
     .from('settings')
-    .select('id, user_id, theme, accent_color, currency')
+    .select('id, user_id, theme, accent_color, currency, sidebar_title, sidebar_description')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -2578,7 +2681,7 @@ async function ensureSettings(userId) {
   const { data: inserted, error: insertError } = await supabase
     .from('settings')
     .insert({ user_id: userId, ...DEFAULT_THEME })
-    .select('id, user_id, theme, accent_color, currency')
+    .select('id, user_id, theme, accent_color, currency, sidebar_title, sidebar_description')
     .single()
 
   if (insertError) throw insertError
