@@ -49,6 +49,10 @@ const DEFAULT_THEME = {
   currency: 'CAD',
   sidebar_title: 'Your money, in motion.',
   sidebar_description: 'Track spending, protect goals, stay ahead of bills, and keep your monthly plan simple.',
+  payday_frequency: 'monthly',
+  payday_anchor_date: today(),
+  payday_day_of_month: new Date().getDate(),
+  safety_amount: 0,
 }
 
 function App() {
@@ -133,6 +137,8 @@ function BudgetApp({ user, notice, onNotice }) {
   const [recurringTransactions, setRecurringTransactions] = useState([])
   const [categoryBudgets, setCategoryBudgets] = useState([])
   const [bills, setBills] = useState([])
+  const [subscriptions, setSubscriptions] = useState([])
+  const [transactionTemplates, setTransactionTemplates] = useState([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
@@ -143,6 +149,7 @@ function BudgetApp({ user, notice, onNotice }) {
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme ?? 'light'
     document.documentElement.dataset.accent = settings.accent_color ?? 'blue'
+    document.documentElement.dataset.design = 'premium'
   }, [settings.accent_color, settings.theme])
 
   useEffect(() => {
@@ -176,6 +183,8 @@ function BudgetApp({ user, notice, onNotice }) {
           { data: refreshedRecurringData, error: refreshedRecurringError },
           { data: budgetsData, error: budgetsError },
           { data: billsData, error: billsError },
+          { data: subscriptionsData, error: subscriptionsError },
+          { data: templatesData, error: templatesError },
         ] = await Promise.all([
           supabase
             .from('transactions')
@@ -202,6 +211,16 @@ function BudgetApp({ user, notice, onNotice }) {
             .select('id, user_id, name, amount, due_date, category_id, paid, created_at')
             .eq('user_id', user.id)
             .order('due_date', { ascending: true }),
+          supabase
+            .from('subscriptions')
+            .select('id, user_id, merchant_key, name, amount, frequency, category_id, status, source, last_charged_date, created_at')
+            .eq('user_id', user.id)
+            .order('created_at', { ascending: false }),
+          supabase
+            .from('transaction_templates')
+            .select('id, user_id, name, amount, type, category_id, notes, created_at')
+            .eq('user_id', user.id)
+            .order('created_at', { ascending: false }),
         ])
 
         if (transactionsError) throw transactionsError
@@ -209,6 +228,8 @@ function BudgetApp({ user, notice, onNotice }) {
         if (refreshedRecurringError) throw refreshedRecurringError
         if (budgetsError) throw budgetsError
         if (billsError) throw billsError
+        if (subscriptionsError) throw subscriptionsError
+        if (templatesError) throw templatesError
 
         const goalIds = (goalsData ?? []).map((goal) => goal.id)
         let contributionsData = []
@@ -234,6 +255,8 @@ function BudgetApp({ user, notice, onNotice }) {
           setRecurringTransactions(refreshedRecurringData ?? [])
           setCategoryBudgets(budgetsData ?? [])
           setBills(billsData ?? [])
+          setSubscriptions(subscriptionsData ?? [])
+          setTransactionTemplates(templatesData ?? [])
         }
       } catch (error) {
         onNotice(error.message || 'Unable to load your budget data.')
@@ -292,9 +315,35 @@ function BudgetApp({ user, notice, onNotice }) {
     [bills, categoryMap],
   )
 
+  const templatesWithCategory = useMemo(
+    () =>
+      transactionTemplates.map((template) => ({
+        ...template,
+        amount: Number(template.amount),
+        category: categoryMap[template.category_id] ?? null,
+      })),
+    [categoryMap, transactionTemplates],
+  )
+
   const dashboardData = useMemo(
     () => buildDashboardData(transactionsWithCategory, budgetMap, goals, categoryMap),
     [budgetMap, categoryMap, goals, transactionsWithCategory],
+  )
+
+  const subscriptionData = useMemo(
+    () => buildSubscriptionData(transactionsWithCategory, subscriptions, categoryMap),
+    [categoryMap, subscriptions, transactionsWithCategory],
+  )
+
+  const paydayPlan = useMemo(
+    () =>
+      buildPaydayPlan({
+        recurringTransactions,
+        bills: billsWithCategory,
+        settings,
+        transactions: transactionsWithCategory,
+      }),
+    [billsWithCategory, recurringTransactions, settings, transactionsWithCategory],
   )
 
   const enrichedGoals = useMemo(() => enrichGoals(goals, contributions), [contributions, goals])
@@ -565,9 +614,24 @@ function BudgetApp({ user, notice, onNotice }) {
         currency: nextSettings.currency,
         sidebar_title: nextSettings.sidebar_title,
         sidebar_description: nextSettings.sidebar_description,
+        payday_frequency: nextSettings.payday_frequency,
+        payday_anchor_date: nextSettings.payday_anchor_date || null,
+        payday_day_of_month: nextSettings.payday_day_of_month ? Number(nextSettings.payday_day_of_month) : null,
+        safety_amount: Number(nextSettings.safety_amount || 0),
       }
 
-      const { error } = await supabase.from('settings').upsert(payload, { onConflict: 'user_id' })
+      let error = null
+      for (const candidate of buildSettingsPayloadVariants(payload)) {
+        const result = await supabase.from('settings').upsert(candidate, { onConflict: 'user_id' })
+        error = result.error
+        if (!error) {
+          break
+        }
+        if (!isMissingSettingsColumnError(error)) {
+          break
+        }
+      }
+
       if (error) throw error
 
       setSettings(nextSettings)
@@ -668,6 +732,81 @@ function BudgetApp({ user, notice, onNotice }) {
       await refreshData()
     } catch (error) {
       onNotice(error.message || 'Unable to delete bill.')
+    }
+  }
+
+  async function saveSubscription(payload, subscriptionId = null) {
+    try {
+      const basePayload = {
+        user_id: user.id,
+        merchant_key: payload.merchant_key || buildMerchantKey(payload.name),
+        name: payload.name.trim(),
+        amount: Number(payload.amount),
+        frequency: payload.frequency,
+        category_id: payload.category_id || null,
+        status: payload.status || 'confirmed',
+        source: payload.source || 'manual',
+        last_charged_date: payload.last_charged_date || null,
+      }
+
+      const query = subscriptionId
+        ? supabase.from('subscriptions').update(basePayload).eq('id', subscriptionId).eq('user_id', user.id)
+        : supabase.from('subscriptions').upsert(basePayload, { onConflict: 'user_id,merchant_key' })
+
+      const { error } = await query
+      if (error) throw error
+
+      onNotice(subscriptionId ? 'Subscription updated.' : 'Subscription saved.')
+      await refreshData()
+    } catch (error) {
+      onNotice(error.message || 'Unable to save subscription.')
+    }
+  }
+
+  async function deleteSubscription(subscriptionId) {
+    try {
+      const { error } = await supabase.from('subscriptions').delete().eq('id', subscriptionId).eq('user_id', user.id)
+      if (error) throw error
+      onNotice('Subscription removed.')
+      await refreshData()
+    } catch (error) {
+      onNotice(error.message || 'Unable to remove subscription.')
+    }
+  }
+
+  async function saveTransactionTemplate(payload, templateId = null) {
+    try {
+      const basePayload = {
+        user_id: user.id,
+        name: payload.name.trim(),
+        amount: Number(payload.amount),
+        type: payload.type,
+        category_id: payload.category_id || null,
+        notes: payload.notes?.trim() || null,
+      }
+
+      const query = templateId
+        ? supabase.from('transaction_templates').update(basePayload).eq('id', templateId).eq('user_id', user.id)
+        : supabase.from('transaction_templates').insert(basePayload)
+
+      const { error } = await query
+      if (error) throw error
+
+      onNotice(templateId ? 'Template updated.' : 'Template saved.')
+      await refreshData()
+    } catch (error) {
+      onNotice(error.message || 'Unable to save template.')
+    }
+  }
+
+  async function deleteTransactionTemplate(templateId) {
+    try {
+      const { error } = await supabase.from('transaction_templates').delete().eq('id', templateId).eq('user_id', user.id)
+      if (error) throw error
+      onNotice('Template deleted.')
+      await refreshData()
+    } catch (error) {
+      onNotice(error.message || 'Unable to delete template.')
     }
   }
 
@@ -775,29 +914,33 @@ function BudgetApp({ user, notice, onNotice }) {
   }
 
   const content = {
-    dashboard: (
-      <DashboardPage
-        dashboardData={dashboardData}
-        dismissedOverspendSignature={dismissedOverspendSignature}
-        formatCurrency={formatCurrency}
-        onDismissOverspend={dismissOverspendAlert}
-        overspendSignature={overspendSignature}
-        transactions={transactionsWithCategory}
-      />
-    ),
-    transactions: (
-      <TransactionsPage
-        budgetProgress={dashboardData.budgetProgress}
-        categories={categories}
-        currencyCode={currencyCode}
-        formatCurrency={formatCurrency}
-        onDeleteTransaction={deleteTransaction}
-        onImportTransactions={importTransactions}
-        onSaveTransaction={saveTransaction}
-        saving={saving}
-        transactions={transactionsWithCategory}
-      />
-    ),
+      dashboard: (
+        <DashboardPage
+          dashboardData={dashboardData}
+          dismissedOverspendSignature={dismissedOverspendSignature}
+          formatCurrency={formatCurrency}
+          onDismissOverspend={dismissOverspendAlert}
+          overspendSignature={overspendSignature}
+          paydayPlan={paydayPlan}
+          subscriptionData={subscriptionData}
+          transactions={transactionsWithCategory}
+        />
+      ),
+      transactions: (
+        <TransactionsPage
+          budgetProgress={dashboardData.budgetProgress}
+          categories={categories}
+          currencyCode={currencyCode}
+          formatCurrency={formatCurrency}
+          onDeleteTransaction={deleteTransaction}
+          onImportTransactions={importTransactions}
+          onSaveTransaction={saveTransaction}
+          onSaveTemplate={saveTransactionTemplate}
+          saving={saving}
+          templates={templatesWithCategory}
+          transactions={transactionsWithCategory}
+        />
+      ),
     bills: (
       <BillsPage
         bills={billsWithCategory}
@@ -816,25 +959,31 @@ function BudgetApp({ user, notice, onNotice }) {
         onSaveGoal={saveGoal}
       />
     ),
-    settings: (
-      <SettingsPage
-        key={`${settings.theme}|${settings.accent_color}|${settings.currency}|${settings.sidebar_title ?? ''}|${settings.sidebar_description ?? ''}`}
-        budgetMap={budgetMap}
-        categories={categories}
-        formatCurrency={formatCurrency}
-        notice={notice}
-        onCreateCategory={createCategory}
-        onDeleteCategory={removeCategory}
-        onDeleteRecurring={deleteRecurringTransaction}
-        onExportTransactions={exportTransactions}
-        onSaveBudgetLimit={saveBudgetLimit}
-        onSaveSettings={saveSettings}
-        onToggleRecurring={updateRecurringTransaction}
-        onUpdateCategory={updateCategory}
-        recurringTransactions={recurringTransactions}
-        settings={settings}
-      />
-    ),
+      settings: (
+        <SettingsPage
+          key={`${settings.theme}|${settings.accent_color}|${settings.currency}|${settings.sidebar_title ?? ''}|${settings.sidebar_description ?? ''}|${settings.payday_frequency ?? ''}|${settings.payday_anchor_date ?? ''}|${settings.payday_day_of_month ?? ''}|${settings.safety_amount ?? ''}`}
+          budgetMap={budgetMap}
+          categories={categories}
+          formatCurrency={formatCurrency}
+          notice={notice}
+          onCreateCategory={createCategory}
+          onDeleteCategory={removeCategory}
+          onDeleteRecurring={deleteRecurringTransaction}
+          onDeleteSubscription={deleteSubscription}
+          onDeleteTemplate={deleteTransactionTemplate}
+          onExportTransactions={exportTransactions}
+          onSaveBudgetLimit={saveBudgetLimit}
+          onSaveSettings={saveSettings}
+          onSaveSubscription={saveSubscription}
+          onSaveTemplate={saveTransactionTemplate}
+          onToggleRecurring={updateRecurringTransaction}
+          onUpdateCategory={updateCategory}
+          recurringTransactions={recurringTransactions}
+          subscriptions={subscriptionData}
+          settings={settings}
+          templates={templatesWithCategory}
+        />
+      ),
   }
 
   return (
@@ -935,6 +1084,8 @@ function DashboardPage({
   formatCurrency,
   onDismissOverspend,
   overspendSignature,
+  paydayPlan,
+  subscriptionData,
   transactions,
 }) {
   const showOverspendBanner =
@@ -965,19 +1116,107 @@ function DashboardPage({
         </section>
       )}
 
-      <section className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
-        <div className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+      <section className="grid gap-6 xl:grid-cols-2">
+        <ChartCard title="Subscriptions" subtitle="Recurring charges to keep in view">
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+              <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Monthly</p>
+              <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
+                {formatCurrency(subscriptionData.totalMonthlyCost)}
+              </p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                {subscriptionData.confirmed.length} confirmed and {subscriptionData.pending.length} pending detection{subscriptionData.pending.length === 1 ? '' : 's'}
+              </p>
+            </div>
+            <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+              <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Yearly</p>
+              <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
+                {formatCurrency(subscriptionData.totalYearlyCost)}
+              </p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                {subscriptionData.all.length ? `${subscriptionData.all[0].name} is your largest tracked subscription.` : 'No subscriptions detected yet.'}
+              </p>
+            </div>
+          </div>
+          <div className="mt-5 space-y-3">
+            {subscriptionData.all.slice(0, 4).map((subscription) => (
+              <div key={`${subscription.source}-${subscription.merchant_key}`} className="flex flex-wrap items-center justify-between gap-3 rounded-3xl bg-[var(--surface-muted)] p-4">
+                <div>
+                  <p className="font-medium text-[var(--text-primary)]">{subscription.name}</p>
+                  <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                    {subscription.frequency} • Last charged {shortDate(subscription.last_charged_date)}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="font-semibold text-[var(--text-primary)]">{formatCurrency(subscription.estimated_monthly_cost)}/mo</p>
+                  <p className="text-sm text-[var(--text-secondary)]">{formatCurrency(subscription.yearly_cost)}/yr</p>
+                </div>
+              </div>
+            ))}
+            {!subscriptionData.all.length && (
+              <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-5 text-sm text-[var(--text-secondary)]">
+                Add a few repeated transactions and the app will start grouping likely subscriptions for review.
+              </div>
+            )}
+          </div>
+        </ChartCard>
+
+        <ChartCard title="Payday Planner" subtitle="Projected balance through your next pay cycle">
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+              <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Next payday</p>
+              <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
+                {paydayPlan.nextPayday ? shortDate(paydayPlan.nextPayday) : 'Set payday'}
+              </p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">{paydayPlan.scheduleLabel}</p>
+            </div>
+            <div className={cn(
+              'rounded-3xl p-5',
+              paydayPlan.status === 'danger'
+                ? 'bg-rose-500/12'
+                : paydayPlan.status === 'warning'
+                  ? 'bg-amber-500/12'
+                  : 'bg-[var(--surface-muted)]',
+            )}>
+              <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Projected available</p>
+              <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
+                {formatCurrency(paydayPlan.projectedAvailable)}
+              </p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">{paydayPlan.message}</p>
+            </div>
+          </div>
+          <div className="mt-5 space-y-3">
+            {paydayPlan.items.slice(0, 5).map((item) => (
+              <div key={`${item.kind}-${item.label}-${item.date}`} className="flex flex-wrap items-center justify-between gap-3 rounded-3xl bg-[var(--surface-muted)] p-4">
+                <div>
+                  <p className="font-medium text-[var(--text-primary)]">{item.label}</p>
+                  <p className="mt-1 text-sm text-[var(--text-secondary)]">{shortDate(item.date)} • {item.kind}</p>
+                </div>
+                <p className="font-semibold text-[var(--text-primary)]">-{formatCurrency(item.amount)}</p>
+              </div>
+            ))}
+            {!paydayPlan.items.length && (
+              <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-5 text-sm text-[var(--text-secondary)]">
+                Add a payday schedule in Settings to map bills, recurring charges, and expected spending before the next cheque lands.
+              </div>
+            )}
+          </div>
+        </ChartCard>
+      </section>
+
+      <section className="grid gap-5 2xl:grid-cols-[2.2fr_0.8fr]">
+        <div className="rounded-[2.25rem] border border-[var(--border-soft)] bg-[var(--surface)] p-7 shadow-soft xl:p-8">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Monthly Summary</p>
-              <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">{monthLabel()}</h2>
+              <h2 className="mt-2 text-[1.85rem] font-semibold text-[var(--text-primary)] sm:text-[2rem]">{monthLabel()}</h2>
             </div>
-            <div className="max-w-full rounded-full bg-[var(--surface-muted)] px-4 py-2 text-sm text-[var(--text-secondary)] md:max-w-[18rem]">
+            <div className="max-w-full rounded-full bg-[var(--surface-muted)] px-4 py-2 text-sm text-[var(--text-secondary)] md:max-w-[22rem]">
               Running balance {formatCurrency(dashboardData.runningBalance)}
             </div>
           </div>
 
-          <div className="mt-6 grid gap-4 sm:grid-cols-2 2xl:grid-cols-4">
+          <div className="mt-7 grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
             <SummaryCard label="Income" value={formatCurrency(dashboardData.monthlyIncome)} tone="positive" />
             <SummaryCard label="Expenses" value={formatCurrency(dashboardData.monthlyExpenses)} tone="negative" />
             <SummaryCard label="Net" value={formatCurrency(dashboardData.netBalance)} tone="neutral" />
@@ -1127,7 +1366,9 @@ function TransactionsPage({
   onDeleteTransaction,
   onImportTransactions,
   onSaveTransaction,
+  onSaveTemplate,
   saving,
+  templates,
   transactions,
 }) {
   const pageSize = 10
@@ -1148,6 +1389,7 @@ function TransactionsPage({
   })
 
   const visibleCategories = useMemo(() => dedupeCategories(categories), [categories])
+  const quickTemplates = templates.slice(0, 4)
   const filteredCategories = visibleCategories.filter((category) => category.type === form.type)
   const selectedCategoryId = form.category_id || filteredCategories[0]?.id || ''
   const availableSplitCategories = visibleCategories.filter((category) => category.type === form.type)
@@ -1198,6 +1440,33 @@ function TransactionsPage({
   function resetForm() {
     setEditingId(null)
     setForm(buildTransactionForm(categories))
+  }
+
+  function applyTemplate(template) {
+    setEditingId(null)
+    setForm({
+      ...buildTransactionForm(categories),
+      date: today(),
+      amount: template.amount,
+      type: template.type,
+      category_id: template.category_id || visibleCategories.find((category) => category.type === template.type)?.id || '',
+      description: template.name,
+      notes: template.notes ?? '',
+    })
+  }
+
+  async function saveCurrentAsTemplate() {
+    if (!form.description.trim() || !form.amount) {
+      return
+    }
+
+    await onSaveTemplate({
+      name: form.description,
+      amount: form.amount,
+      type: form.type,
+      category_id: selectedCategoryId,
+      notes: form.notes,
+    })
   }
 
   async function submitForm(event) {
@@ -1295,6 +1564,53 @@ function TransactionsPage({
           </div>
 
           <div className="mt-6 grid gap-4">
+            <div className="rounded-3xl bg-[var(--surface-muted)] p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-[var(--text-primary)]">Quick templates</p>
+                  <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                    Reuse everyday entries like Ubertrip, Metrobus, or Colemans in one tap.
+                  </p>
+                </div>
+                <button type="button" onClick={saveCurrentAsTemplate} className="secondary-button">
+                  Save current as template
+                </button>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-[1.2fr_auto]">
+                <select
+                  defaultValue=""
+                  onChange={(event) => {
+                    const template = templates.find((item) => item.id === event.target.value)
+                    if (template) {
+                      applyTemplate(template)
+                      event.target.value = ''
+                    }
+                  }}
+                  className="field select-field"
+                >
+                  <option value="">Use a saved template</option>
+                  {templates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name} • {formatCurrency(template.amount)}
+                    </option>
+                  ))}
+                </select>
+                <div className="flex flex-wrap gap-2">
+                  {quickTemplates.map((template) => (
+                    <button
+                      key={template.id}
+                      type="button"
+                      onClick={() => applyTemplate(template)}
+                      className="rounded-full bg-[var(--surface)] px-4 py-2 text-sm text-[var(--accent-strong)] shadow-soft"
+                    >
+                      {template.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
             <div className="grid gap-3 sm:grid-cols-2">
               <select value={form.type} onChange={(event) => handleFormChange('type', event.target.value)} className="field select-field">
                 <option value="expense">Expense</option>
@@ -1684,6 +2000,21 @@ function TransactionsPage({
                           Split
                         </span>
                       )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onSaveTemplate({
+                            name: transaction.description,
+                            amount: transaction.amount,
+                            type: transaction.type,
+                            category_id: transaction.category_id,
+                            notes: transaction.notes,
+                          })
+                        }
+                        className="rounded-full bg-[var(--accent-soft)] px-3 py-1 text-xs text-[var(--accent-strong)]"
+                      >
+                        Save template
+                      </button>
                     </div>
                   </td>
                   <td className="px-4 py-4">
@@ -2064,15 +2395,34 @@ function SettingsPage({
   onCreateCategory,
   onDeleteCategory,
   onDeleteRecurring,
+  onDeleteSubscription,
+  onDeleteTemplate,
   onExportTransactions,
   onSaveBudgetLimit,
   onSaveSettings,
+  onSaveSubscription,
+  onSaveTemplate,
   onToggleRecurring,
   onUpdateCategory,
   recurringTransactions,
+  subscriptions,
   settings,
+  templates,
 }) {
   const [draft, setDraft] = useState(() => settings)
+  const [manualSubscription, setManualSubscription] = useState({
+    name: '',
+    amount: '',
+    frequency: 'monthly',
+    category_id: categories.find((category) => category.type === 'expense')?.id ?? '',
+  })
+  const [templateForm, setTemplateForm] = useState({
+    name: '',
+    amount: '',
+    type: 'expense',
+    category_id: categories.find((category) => category.type === 'expense')?.id ?? '',
+    notes: '',
+  })
   const [categoryForm, setCategoryForm] = useState({
     name: '',
     color: '#2563eb',
@@ -2107,6 +2457,10 @@ function SettingsPage({
       return true
     })
   }, [categories])
+  const templateCategories = useMemo(
+    () => visibleCategories.filter((category) => category.type === templateForm.type),
+    [templateForm.type, visibleCategories],
+  )
 
   return (
     <div className="space-y-6">
@@ -2186,8 +2540,52 @@ function SettingsPage({
       </section>
 
       <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
-        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Sidebar Copy</p>
-        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Edit the left sidebar text</h2>
+        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Payday Planner</p>
+        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Set your pay cycle and safety floor</h2>
+        <div className="mt-6 grid gap-4 lg:grid-cols-4">
+          <select
+            value={draft.payday_frequency ?? 'monthly'}
+            onChange={(event) => setDraft((current) => ({ ...current, payday_frequency: event.target.value }))}
+            className="field select-field"
+          >
+            <option value="monthly">Monthly</option>
+            <option value="biweekly">Biweekly</option>
+            <option value="weekly">Weekly</option>
+          </select>
+          <input
+            type="date"
+            value={draft.payday_anchor_date ?? ''}
+            onChange={(event) => setDraft((current) => ({ ...current, payday_anchor_date: event.target.value }))}
+            className="field"
+          />
+          <input
+            type="number"
+            min="1"
+            max="31"
+            value={draft.payday_day_of_month ?? ''}
+            onChange={(event) => setDraft((current) => ({ ...current, payday_day_of_month: event.target.value }))}
+            className="field"
+            placeholder="Day of month"
+            disabled={draft.payday_frequency !== 'monthly'}
+          />
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={draft.safety_amount ?? 0}
+            onChange={(event) => setDraft((current) => ({ ...current, safety_amount: event.target.value }))}
+            className="field"
+            placeholder="Safety amount"
+          />
+        </div>
+        <p className="mt-4 text-sm text-[var(--text-secondary)]">
+          Use the anchor date for weekly or biweekly paydays. For monthly pay, set the day of the month you usually get paid.
+        </p>
+      </section>
+
+        <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+          <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Sidebar Copy</p>
+          <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Edit the left sidebar text</h2>
         <div className="mt-6 grid gap-4">
           <input
             type="text"
@@ -2263,6 +2661,282 @@ function SettingsPage({
           ) : (
             <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-6 text-sm text-[var(--text-secondary)]">
               Turn on the recurring toggle when adding a transaction to manage it here.
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Subscriptions</p>
+        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Confirm, ignore, or add subscriptions</h2>
+
+        <form
+          onSubmit={async (event) => {
+            event.preventDefault()
+            await onSaveSubscription({
+              ...manualSubscription,
+              status: 'confirmed',
+              source: 'manual',
+              last_charged_date: today(),
+            })
+            setManualSubscription({
+              name: '',
+              amount: '',
+              frequency: 'monthly',
+              category_id: expenseCategoriesForBudgets[0]?.id ?? '',
+            })
+          }}
+          className="mt-6 grid gap-4 lg:grid-cols-[1.2fr_0.8fr_0.8fr_0.8fr_auto]"
+        >
+          <input
+            type="text"
+            value={manualSubscription.name}
+            onChange={(event) => setManualSubscription((current) => ({ ...current, name: event.target.value }))}
+            placeholder="Netflix, Spotify, Prime..."
+            className="field"
+            required
+          />
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={manualSubscription.amount}
+            onChange={(event) => setManualSubscription((current) => ({ ...current, amount: event.target.value }))}
+            placeholder="Amount"
+            className="field"
+            required
+          />
+          <select
+            value={manualSubscription.frequency}
+            onChange={(event) => setManualSubscription((current) => ({ ...current, frequency: event.target.value }))}
+            className="field select-field"
+          >
+            <option value="monthly">Monthly</option>
+            <option value="weekly">Weekly</option>
+          </select>
+          <select
+            value={manualSubscription.category_id}
+            onChange={(event) => setManualSubscription((current) => ({ ...current, category_id: event.target.value }))}
+            className="field select-field"
+          >
+            {expenseCategoriesForBudgets.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+          <button type="submit" className="primary-button">
+            Add subscription
+          </button>
+        </form>
+
+        <div className="mt-6 grid gap-6 lg:grid-cols-2">
+          <div>
+            <p className="text-sm font-medium text-[var(--text-primary)]">Detected to review</p>
+            <div className="mt-4 space-y-3">
+              {subscriptions.pending.length ? (
+                subscriptions.pending.map((item) => (
+                  <div key={item.merchant_key} className="rounded-3xl bg-[var(--surface-muted)] p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="font-medium text-[var(--text-primary)]">{item.name}</p>
+                        <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                          {formatCurrency(item.estimated_monthly_cost)}/mo • {item.frequency} • Last {shortDate(item.last_charged_date)}
+                        </p>
+                      </div>
+                      <p className="text-sm text-[var(--text-secondary)]">{formatCurrency(item.yearly_cost)}/yr</p>
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-3 text-sm">
+                      <button
+                        type="button"
+                        onClick={() => onSaveSubscription({ ...item, status: 'confirmed', source: 'detected' })}
+                        className="text-[var(--accent-strong)]"
+                      >
+                        Confirm
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onSaveSubscription({ ...item, status: 'ignored', source: 'detected' })}
+                        className="text-[var(--text-secondary)]"
+                      >
+                        Ignore
+                      </button>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-5 text-sm text-[var(--text-secondary)]">
+                  No new likely subscriptions to review right now.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <p className="text-sm font-medium text-[var(--text-primary)]">Tracked subscriptions</p>
+            <div className="mt-4 space-y-3">
+              {subscriptions.confirmed.length ? (
+                subscriptions.confirmed.map((item) => (
+                  <div key={item.id ?? item.merchant_key} className="rounded-3xl bg-[var(--surface-muted)] p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="font-medium text-[var(--text-primary)]">{item.name}</p>
+                        <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                          {item.frequency} • {formatCurrency(item.estimated_monthly_cost)}/mo • {formatCurrency(item.yearly_cost)}/yr
+                        </p>
+                      </div>
+                      {item.id && (
+                        <button type="button" onClick={() => onDeleteSubscription(item.id)} className="text-sm text-rose-500">
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-5 text-sm text-[var(--text-secondary)]">
+                  Confirm a detected subscription or add one manually to track it here.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Quick Templates</p>
+        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Manage saved repeat entries</h2>
+
+        <form
+          onSubmit={async (event) => {
+            event.preventDefault()
+            await onSaveTemplate(templateForm)
+            setTemplateForm({
+              name: '',
+              amount: '',
+              type: 'expense',
+              category_id: templateCategories[0]?.id ?? '',
+              notes: '',
+            })
+          }}
+          className="mt-6 grid gap-4 lg:grid-cols-[1.2fr_0.8fr_0.8fr_0.9fr_1fr_auto]"
+        >
+          <input
+            type="text"
+            value={templateForm.name}
+            onChange={(event) => setTemplateForm((current) => ({ ...current, name: event.target.value }))}
+            placeholder="Ubertrip, Metrobus, Colemans..."
+            className="field"
+            required
+          />
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            value={templateForm.amount}
+            onChange={(event) => setTemplateForm((current) => ({ ...current, amount: event.target.value }))}
+            placeholder="Amount"
+            className="field"
+            required
+          />
+          <select
+            value={templateForm.type}
+            onChange={(event) => setTemplateForm((current) => ({ ...current, type: event.target.value, category_id: '' }))}
+            className="field select-field"
+          >
+            <option value="expense">Expense</option>
+            <option value="income">Income</option>
+          </select>
+          <select
+            value={templateForm.category_id || templateCategories[0]?.id || ''}
+            onChange={(event) => setTemplateForm((current) => ({ ...current, category_id: event.target.value }))}
+            className="field select-field"
+          >
+            {templateCategories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+          <input
+            type="text"
+            value={templateForm.notes}
+            onChange={(event) => setTemplateForm((current) => ({ ...current, notes: event.target.value }))}
+            placeholder="Notes"
+            className="field"
+          />
+          <button type="submit" className="primary-button">
+            Add template
+          </button>
+        </form>
+
+        <div className="mt-6 space-y-3">
+          {templates.length ? (
+            templates.map((template) => (
+              <div key={template.id} className="grid gap-3 rounded-3xl bg-[var(--surface-muted)] p-4 lg:grid-cols-[1fr_0.8fr_0.8fr_1fr_1fr_auto]">
+                <input
+                  type="text"
+                  defaultValue={template.name}
+                  onBlur={(event) => {
+                    const nextName = event.target.value.trim()
+                    if (nextName && nextName !== template.name) {
+                      onSaveTemplate({ ...template, name: nextName }, template.id)
+                    }
+                  }}
+                  className="field"
+                />
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  defaultValue={template.amount}
+                  onBlur={(event) => {
+                    if (event.target.value && Number(event.target.value) !== Number(template.amount)) {
+                      onSaveTemplate({ ...template, amount: event.target.value }, template.id)
+                    }
+                  }}
+                  className="field"
+                />
+                <select
+                  defaultValue={template.type}
+                  onChange={(event) => onSaveTemplate({ ...template, type: event.target.value }, template.id)}
+                  className="field select-field"
+                >
+                  <option value="expense">Expense</option>
+                  <option value="income">Income</option>
+                </select>
+                <select
+                  defaultValue={template.category_id ?? ''}
+                  onChange={(event) => onSaveTemplate({ ...template, category_id: event.target.value || null }, template.id)}
+                  className="field select-field"
+                >
+                  {visibleCategories
+                    .filter((category) => category.type === template.type)
+                    .map((category) => (
+                      <option key={category.id} value={category.id}>
+                        {category.name}
+                      </option>
+                    ))}
+                </select>
+                <input
+                  type="text"
+                  defaultValue={template.notes ?? ''}
+                  placeholder="Notes"
+                  onBlur={(event) => {
+                    if ((event.target.value ?? '') !== (template.notes ?? '')) {
+                      onSaveTemplate({ ...template, notes: event.target.value }, template.id)
+                    }
+                  }}
+                  className="field"
+                />
+                <button type="button" onClick={() => onDeleteTemplate(template.id)} className="text-sm text-rose-500">
+                  Delete
+                </button>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-5 text-sm text-[var(--text-secondary)]">
+              Save a transaction as a template to reuse it here.
             </div>
           )}
         </div>
@@ -2508,9 +3182,9 @@ function SummaryCard({ label, tone, value }) {
         : 'bg-[var(--surface-muted)] text-[var(--text-primary)]'
 
   return (
-    <div className={cn('min-w-0 rounded-3xl p-5', toneClass)}>
+    <div className={cn('min-w-0 rounded-3xl p-5 xl:p-6', toneClass)}>
       <p className="text-xs uppercase tracking-[0.3em]">{label}</p>
-      <p className="mt-4 break-words text-xl font-semibold leading-tight md:text-2xl">{value}</p>
+      <p className="mt-4 whitespace-nowrap text-lg font-semibold leading-tight md:text-xl xl:text-2xl">{value}</p>
     </div>
   )
 }
@@ -2687,23 +3361,312 @@ async function ensureCategories(userId) {
 }
 
 async function ensureSettings(userId) {
-  const { data, error } = await supabase
-    .from('settings')
-    .select('id, user_id, theme, accent_color, currency, sidebar_title, sidebar_description')
-    .eq('user_id', userId)
-    .maybeSingle()
+  let data = null
+  let error = null
+
+  for (const columns of SETTINGS_SELECT_VARIANTS) {
+    const result = await supabase.from('settings').select(columns).eq('user_id', userId).maybeSingle()
+    data = result.data
+    error = result.error
+    if (!error || !isMissingSettingsColumnError(error)) {
+      break
+    }
+  }
 
   if (error) throw error
   if (data) return data
 
-  const { data: inserted, error: insertError } = await supabase
-    .from('settings')
-    .insert({ user_id: userId, ...DEFAULT_THEME })
-    .select('id, user_id, theme, accent_color, currency, sidebar_title, sidebar_description')
-    .single()
+  let inserted = null
+  let insertError = null
+
+  for (const payload of buildSettingsPayloadVariants({ user_id: userId, ...DEFAULT_THEME })) {
+    const result = await supabase
+      .from('settings')
+      .insert(payload)
+      .select(SETTINGS_SELECT_VARIANTS[0])
+      .single()
+    inserted = result.data
+    insertError = result.error
+    if (!insertError || !isMissingSettingsColumnError(insertError)) {
+      break
+    }
+  }
 
   if (insertError) throw insertError
-  return inserted
+  return { ...DEFAULT_THEME, ...inserted }
+}
+
+function isMissingSettingsColumnError(error) {
+  const message = error?.message ?? ''
+  return SETTINGS_OPTIONAL_COLUMNS.some((column) => message.includes(column))
+}
+
+const SETTINGS_SELECT_VARIANTS = [
+  'id, user_id, theme, accent_color, currency, sidebar_title, sidebar_description, payday_frequency, payday_anchor_date, payday_day_of_month, safety_amount',
+  'id, user_id, theme, accent_color, currency, sidebar_title, sidebar_description',
+  'id, user_id, theme, accent_color, currency',
+]
+
+const SETTINGS_OPTIONAL_COLUMNS = [
+  'sidebar_title',
+  'sidebar_description',
+  'payday_frequency',
+  'payday_anchor_date',
+  'payday_day_of_month',
+  'safety_amount',
+]
+
+function buildSettingsPayloadVariants(payload) {
+  return [
+    payload,
+    {
+      user_id: payload.user_id,
+      theme: payload.theme,
+      accent_color: payload.accent_color,
+      currency: payload.currency,
+      sidebar_title: payload.sidebar_title,
+      sidebar_description: payload.sidebar_description,
+    },
+    {
+      user_id: payload.user_id,
+      theme: payload.theme,
+      accent_color: payload.accent_color,
+      currency: payload.currency,
+    },
+  ]
+}
+
+function buildSubscriptionData(transactions, savedSubscriptions, categoryMap) {
+  const savedMap = new Map(savedSubscriptions.map((item) => [item.merchant_key, item]))
+  const detected = detectSubscriptionCandidates(transactions, categoryMap)
+  const pending = detected.filter((item) => {
+    const saved = savedMap.get(item.merchant_key)
+    return !saved || saved.status === 'pending'
+  })
+  const confirmed = savedSubscriptions
+    .filter((item) => item.status === 'confirmed')
+    .map((item) => hydrateSubscription(item, categoryMap))
+  const all = [...confirmed, ...pending].sort((left, right) => right.estimated_monthly_cost - left.estimated_monthly_cost)
+  return {
+    pending,
+    confirmed,
+    all,
+    totalMonthlyCost: all.reduce((sum, item) => sum + Number(item.estimated_monthly_cost || 0), 0),
+    totalYearlyCost: all.reduce((sum, item) => sum + Number(item.yearly_cost || 0), 0),
+  }
+}
+
+function hydrateSubscription(item, categoryMap) {
+  const monthlyCost = item.frequency === 'weekly' ? Number(item.amount) * 4.33 : Number(item.amount)
+  return {
+    ...item,
+    amount: Number(item.amount),
+    category: categoryMap[item.category_id] ?? null,
+    estimated_monthly_cost: monthlyCost,
+    yearly_cost: monthlyCost * 12,
+  }
+}
+
+function detectSubscriptionCandidates(transactions, categoryMap) {
+  const expenseTransactions = transactions.filter((transaction) => transaction.type === 'expense')
+  const groups = new Map()
+
+  expenseTransactions.forEach((transaction) => {
+    const merchantKey = buildMerchantKey(transaction.description)
+    if (!merchantKey || merchantKey.length < 3) {
+      return
+    }
+    const current = groups.get(merchantKey) ?? []
+    current.push(transaction)
+    groups.set(merchantKey, current)
+  })
+
+  return [...groups.entries()]
+    .map(([merchantKey, items]) => {
+      if (items.length < 2) {
+        return null
+      }
+
+      const ordered = [...items].sort((left, right) => left.date.localeCompare(right.date))
+      const amounts = ordered.map((item) => Number(item.amount))
+      const averageAmount = amounts.reduce((sum, value) => sum + value, 0) / amounts.length
+      const amountVariance = Math.max(...amounts.map((value) => Math.abs(value - averageAmount)))
+      if (amountVariance > Math.max(2, averageAmount * 0.12)) {
+        return null
+      }
+
+      const intervals = []
+      for (let index = 1; index < ordered.length; index += 1) {
+        intervals.push(daysBetween(ordered[index - 1].date, ordered[index].date))
+      }
+      const averageInterval = intervals.reduce((sum, value) => sum + value, 0) / intervals.length
+      const frequency =
+        averageInterval >= 5 && averageInterval <= 9
+          ? 'weekly'
+          : averageInterval >= 25 && averageInterval <= 35
+            ? 'monthly'
+            : null
+
+      if (!frequency) {
+        return null
+      }
+
+      const lastTransaction = ordered.at(-1)
+      const monthlyCost = frequency === 'weekly' ? averageAmount * 4.33 : averageAmount
+
+      return {
+        merchant_key: merchantKey,
+        name: prettifyMerchantName(lastTransaction.description),
+        amount: Number(averageAmount.toFixed(2)),
+        frequency,
+        category_id: lastTransaction.category_id,
+        category: categoryMap[lastTransaction.category_id] ?? lastTransaction.category ?? null,
+        last_charged_date: lastTransaction.date,
+        estimated_monthly_cost: Number(monthlyCost.toFixed(2)),
+        yearly_cost: Number((monthlyCost * 12).toFixed(2)),
+        source: 'detected',
+        status: 'pending',
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.estimated_monthly_cost - left.estimated_monthly_cost)
+}
+
+function buildPaydayPlan({ bills, recurringTransactions, settings, transactions }) {
+  const currentBalance = transactions.reduce(
+    (sum, transaction) => sum + (transaction.type === 'income' ? Number(transaction.amount) : -Number(transaction.amount)),
+    0,
+  )
+  const nextPayday = resolveNextPayday(settings)
+  const safetyAmount = Number(settings.safety_amount || 0)
+
+  if (!nextPayday) {
+    return {
+      currentBalance,
+      items: [],
+      message: 'Add a payday schedule in Settings to see your pay-cycle projection.',
+      nextPayday: null,
+      projectedAvailable: currentBalance,
+      scheduleLabel: 'No payday schedule set',
+      status: 'safe',
+    }
+  }
+
+  const recurringItems = recurringTransactions
+    .filter((item) => item.active && item.type === 'expense')
+    .flatMap((item) => expandRecurringUntil(item, nextPayday))
+  const billItems = bills
+    .filter((bill) => !bill.paid && compareDateOnly(bill.due_date, nextPayday) <= 0 && compareDateOnly(bill.due_date, today()) >= 0)
+    .map((bill) => ({ date: bill.due_date, amount: Number(bill.amount), label: bill.name, kind: 'bill' }))
+  const expectedSpendAmount = estimateExpectedSpendUntilPayday(transactions, nextPayday)
+  const expectedSpendDate = nextPayday
+  const items = [...billItems, ...recurringItems]
+  if (expectedSpendAmount > 0) {
+    items.push({ date: expectedSpendDate, amount: expectedSpendAmount, label: 'Expected everyday spending', kind: 'forecast' })
+  }
+  items.sort((left, right) => left.date.localeCompare(right.date))
+
+  const projectedAvailable = currentBalance - items.reduce((sum, item) => sum + Number(item.amount), 0)
+  const status = projectedAvailable < 0 ? 'danger' : projectedAvailable < safetyAmount ? 'warning' : 'safe'
+  const message =
+    status === 'danger'
+      ? 'Projected balance drops below zero before your next payday.'
+      : status === 'warning'
+        ? `Projected balance falls below your ${currency(safetyAmount, settings.currency || 'CAD')} safety amount.`
+        : 'Projected balance stays above your safety floor through the pay cycle.'
+
+  return {
+    currentBalance,
+    items,
+    message,
+    nextPayday,
+    projectedAvailable,
+    scheduleLabel: describePaydaySchedule(settings),
+    status,
+  }
+}
+
+function resolveNextPayday(settings) {
+  const frequency = settings.payday_frequency ?? 'monthly'
+  const anchorDate = settings.payday_anchor_date || today()
+  const todayValue = today()
+
+  if (frequency === 'weekly' || frequency === 'biweekly') {
+    const interval = frequency === 'weekly' ? 7 : 14
+    let cursor = anchorDate
+    while (compareDateOnly(cursor, todayValue) < 0) {
+      cursor = addDaysToDateValue(cursor, interval)
+    }
+    return cursor
+  }
+
+  const dayOfMonth = Number(settings.payday_day_of_month || new Date(`${anchorDate}T00:00:00`).getDate())
+  const current = new Date(`${todayValue}T00:00:00`)
+  let candidate = new Date(current.getFullYear(), current.getMonth(), Math.min(dayOfMonth, daysInMonth(current.getFullYear(), current.getMonth())))
+  if (toDateInputValue(candidate) < todayValue) {
+    candidate = new Date(
+      current.getFullYear(),
+      current.getMonth() + 1,
+      Math.min(dayOfMonth, daysInMonth(current.getFullYear(), current.getMonth() + 1)),
+    )
+  }
+  return toDateInputValue(candidate)
+}
+
+function describePaydaySchedule(settings) {
+  if ((settings.payday_frequency ?? 'monthly') === 'monthly') {
+    return `Monthly on day ${Number(settings.payday_day_of_month || new Date().getDate())}`
+  }
+  return `${settings.payday_frequency ?? 'monthly'} from ${shortDate(settings.payday_anchor_date || today())}`
+}
+
+function expandRecurringUntil(item, endDate) {
+  const items = []
+  let nextDate = item.next_date
+  while (nextDate && compareDateOnly(nextDate, endDate) <= 0) {
+    if (compareDateOnly(nextDate, today()) >= 0) {
+      items.push({ date: nextDate, amount: Number(item.amount), label: item.description, kind: 'recurring' })
+    }
+    nextDate = addRecurringInterval(nextDate, item.frequency)
+  }
+  return items
+}
+
+function estimateExpectedSpendUntilPayday(transactions, nextPayday) {
+  const lookbackStart = addDaysToDateValue(today(), -30)
+  const recentExpenses = transactions.filter(
+    (transaction) => transaction.type === 'expense' && compareDateOnly(transaction.date, lookbackStart) >= 0 && compareDateOnly(transaction.date, today()) <= 0,
+  )
+  const total = recentExpenses.reduce((sum, transaction) => sum + Number(transaction.amount), 0)
+  const dailyAverage = total / 30
+  return Number((dailyAverage * Math.max(daysBetween(today(), nextPayday), 0)).toFixed(2))
+}
+
+function buildMerchantKey(value) {
+  return normalizeText(value)
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function prettifyMerchantName(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+}
+
+function daysBetween(startDate, endDate) {
+  return Math.round((new Date(`${endDate}T00:00:00`).getTime() - new Date(`${startDate}T00:00:00`).getTime()) / 86400000)
+}
+
+function addDaysToDateValue(dateValue, days) {
+  const nextDate = new Date(`${dateValue}T00:00:00`)
+  nextDate.setDate(nextDate.getDate() + days)
+  return toDateInputValue(nextDate)
+}
+
+function daysInMonth(year, monthIndex) {
+  return new Date(year, monthIndex + 1, 0).getDate()
 }
 
 function buildDashboardData(transactions, budgetMap, goals, categoryMap) {
