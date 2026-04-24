@@ -31,7 +31,6 @@ import {
   currency,
   estimateMonthsRemaining,
   getCategoryVisual,
-  getDaysUntil,
   monthKey,
   monthLabel,
   normalizeText,
@@ -48,7 +47,7 @@ const DEFAULT_THEME = {
   accent_color: 'blue',
   currency: 'CAD',
   sidebar_title: 'Your money, in motion.',
-  sidebar_description: 'Track spending, protect goals, stay ahead of bills, and keep your monthly plan simple.',
+  sidebar_description: 'Track spending, protect goals, compare month to month, and keep your budget simple.',
   payday_frequency: 'monthly',
   payday_anchor_date: today(),
   payday_day_of_month: new Date().getDate(),
@@ -136,7 +135,6 @@ function BudgetApp({ user, notice, onNotice }) {
   const [settings, setSettings] = useState(DEFAULT_THEME)
   const [recurringTransactions, setRecurringTransactions] = useState([])
   const [categoryBudgets, setCategoryBudgets] = useState([])
-  const [bills, setBills] = useState([])
   const [subscriptions, setSubscriptions] = useState([])
   const [transactionTemplates, setTransactionTemplates] = useState([])
   const [loading, setLoading] = useState(true)
@@ -182,7 +180,6 @@ function BudgetApp({ user, notice, onNotice }) {
           { data: goalsData, error: goalsError },
           { data: refreshedRecurringData, error: refreshedRecurringError },
           { data: budgetsData, error: budgetsError },
-          { data: billsData, error: billsError },
           { data: subscriptionsData, error: subscriptionsError },
           { data: templatesData, error: templatesError },
         ] = await Promise.all([
@@ -207,11 +204,6 @@ function BudgetApp({ user, notice, onNotice }) {
             .select('id, user_id, category_id, monthly_limit')
             .eq('user_id', user.id),
           supabase
-            .from('bills')
-            .select('id, user_id, name, amount, due_date, category_id, paid, created_at')
-            .eq('user_id', user.id)
-            .order('due_date', { ascending: true }),
-          supabase
             .from('subscriptions')
             .select('id, user_id, merchant_key, name, amount, frequency, category_id, status, source, last_charged_date, created_at')
             .eq('user_id', user.id)
@@ -227,7 +219,6 @@ function BudgetApp({ user, notice, onNotice }) {
         if (goalsError) throw goalsError
         if (refreshedRecurringError) throw refreshedRecurringError
         if (budgetsError) throw budgetsError
-        if (billsError) throw billsError
         if (subscriptionsError) throw subscriptionsError
         if (templatesError) throw templatesError
 
@@ -254,7 +245,6 @@ function BudgetApp({ user, notice, onNotice }) {
           setContributions(contributionsData)
           setRecurringTransactions(refreshedRecurringData ?? [])
           setCategoryBudgets(budgetsData ?? [])
-          setBills(billsData ?? [])
           setSubscriptions(subscriptionsData ?? [])
           setTransactionTemplates(templatesData ?? [])
         }
@@ -305,16 +295,6 @@ function BudgetApp({ user, notice, onNotice }) {
     [categoryMap, transactions],
   )
 
-  const billsWithCategory = useMemo(
-    () =>
-      bills.map((bill) => ({
-        ...bill,
-        amount: Number(bill.amount),
-        category: categoryMap[bill.category_id] ?? null,
-      })),
-    [bills, categoryMap],
-  )
-
   const templatesWithCategory = useMemo(
     () =>
       transactionTemplates.map((template) => ({
@@ -335,19 +315,12 @@ function BudgetApp({ user, notice, onNotice }) {
     [categoryMap, subscriptions, transactionsWithCategory],
   )
 
-  const paydayPlan = useMemo(
-    () =>
-      buildPaydayPlan({
-        recurringTransactions,
-        bills: billsWithCategory,
-        settings,
-        transactions: transactionsWithCategory,
-      }),
-    [billsWithCategory, recurringTransactions, settings, transactionsWithCategory],
-  )
-
   const enrichedGoals = useMemo(() => enrichGoals(goals, contributions), [contributions, goals])
   const savingsData = useMemo(() => buildSavingsData(enrichedGoals), [enrichedGoals])
+  const recapData = useMemo(
+    () => buildMonthlyRecapData(transactionsWithCategory, categoryMap),
+    [categoryMap, transactionsWithCategory],
+  )
 
   const overspendSignature = useMemo(
     () =>
@@ -700,42 +673,6 @@ function BudgetApp({ user, notice, onNotice }) {
     }
   }
 
-  async function saveBill(payload, billId = null) {
-    try {
-      const basePayload = {
-        user_id: user.id,
-        name: payload.name.trim(),
-        amount: Number(payload.amount),
-        due_date: payload.due_date,
-        category_id: payload.category_id,
-        paid: Boolean(payload.paid),
-      }
-
-      const query = billId
-        ? supabase.from('bills').update(basePayload).eq('id', billId).eq('user_id', user.id)
-        : supabase.from('bills').insert(basePayload)
-
-      const { error } = await query
-      if (error) throw error
-
-      onNotice(billId ? 'Bill updated.' : 'Bill added.')
-      await refreshData()
-    } catch (error) {
-      onNotice(error.message || 'Unable to save bill.')
-    }
-  }
-
-  async function deleteBill(billId) {
-    try {
-      const { error } = await supabase.from('bills').delete().eq('id', billId).eq('user_id', user.id)
-      if (error) throw error
-      onNotice('Bill removed.')
-      await refreshData()
-    } catch (error) {
-      onNotice(error.message || 'Unable to delete bill.')
-    }
-  }
-
   async function saveSubscription(payload, subscriptionId = null) {
     try {
       const basePayload = {
@@ -922,7 +859,7 @@ function BudgetApp({ user, notice, onNotice }) {
           formatCurrency={formatCurrency}
           onDismissOverspend={dismissOverspendAlert}
           overspendSignature={overspendSignature}
-          paydayPlan={paydayPlan}
+          recapData={recapData}
           subscriptionData={subscriptionData}
           transactions={transactionsWithCategory}
         />
@@ -942,13 +879,10 @@ function BudgetApp({ user, notice, onNotice }) {
           transactions={transactionsWithCategory}
         />
       ),
-    bills: (
-      <BillsPage
-        bills={billsWithCategory}
-        categories={categories.filter((category) => category.type === 'expense')}
+    recap: (
+      <RecapPage
         formatCurrency={formatCurrency}
-        onDeleteBill={deleteBill}
-        onSaveBill={saveBill}
+        recapData={recapData}
       />
     ),
     goals: (
@@ -1093,7 +1027,7 @@ function DashboardPage({
   formatCurrency,
   onDismissOverspend,
   overspendSignature,
-  paydayPlan,
+  recapData,
   subscriptionData,
   transactions,
 }) {
@@ -1125,102 +1059,14 @@ function DashboardPage({
         </section>
       )}
 
-      <section className="grid gap-6 xl:grid-cols-2">
-        <ChartCard title="Subscriptions" subtitle="Recurring charges to keep in view">
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
-              <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Monthly</p>
-              <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
-                {formatCurrency(subscriptionData.totalMonthlyCost)}
-              </p>
-              <p className="mt-2 text-sm text-[var(--text-secondary)]">
-                {subscriptionData.confirmed.length} confirmed and {subscriptionData.pending.length} pending detection{subscriptionData.pending.length === 1 ? '' : 's'}
-              </p>
-            </div>
-            <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
-              <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Yearly</p>
-              <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
-                {formatCurrency(subscriptionData.totalYearlyCost)}
-              </p>
-              <p className="mt-2 text-sm text-[var(--text-secondary)]">
-                {subscriptionData.all.length ? `${subscriptionData.all[0].name} is your largest tracked subscription.` : 'No subscriptions detected yet.'}
-              </p>
-            </div>
-          </div>
-          <div className="mt-5 space-y-3">
-            {subscriptionData.all.slice(0, 4).map((subscription) => (
-              <div key={`${subscription.source}-${subscription.merchant_key}`} className="flex flex-wrap items-center justify-between gap-3 rounded-3xl bg-[var(--surface-muted)] p-4">
-                <div>
-                  <p className="font-medium text-[var(--text-primary)]">{subscription.name}</p>
-                  <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                    {subscription.frequency} • Last charged {shortDate(subscription.last_charged_date)}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="font-semibold text-[var(--text-primary)]">{formatCurrency(subscription.estimated_monthly_cost)}/mo</p>
-                  <p className="text-sm text-[var(--text-secondary)]">{formatCurrency(subscription.yearly_cost)}/yr</p>
-                </div>
-              </div>
-            ))}
-            {!subscriptionData.all.length && (
-              <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-5 text-sm text-[var(--text-secondary)]">
-                Add a few repeated transactions and the app will start grouping likely subscriptions for review.
-              </div>
-            )}
-          </div>
-        </ChartCard>
-
-        <ChartCard title="Payday Planner" subtitle="Projected balance through your next pay cycle">
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
-              <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Next payday</p>
-              <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
-                {paydayPlan.nextPayday ? shortDate(paydayPlan.nextPayday) : 'Set payday'}
-              </p>
-              <p className="mt-2 text-sm text-[var(--text-secondary)]">{paydayPlan.scheduleLabel}</p>
-            </div>
-            <div className={cn(
-              'rounded-3xl p-5',
-              paydayPlan.status === 'danger'
-                ? 'bg-rose-500/12'
-                : paydayPlan.status === 'warning'
-                  ? 'bg-amber-500/12'
-                  : 'bg-[var(--surface-muted)]',
-            )}>
-              <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Projected available</p>
-              <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
-                {formatCurrency(paydayPlan.projectedAvailable)}
-              </p>
-              <p className="mt-2 text-sm text-[var(--text-secondary)]">{paydayPlan.message}</p>
-            </div>
-          </div>
-          <div className="mt-5 space-y-3">
-            {paydayPlan.items.slice(0, 5).map((item) => (
-              <div key={`${item.kind}-${item.label}-${item.date}`} className="flex flex-wrap items-center justify-between gap-3 rounded-3xl bg-[var(--surface-muted)] p-4">
-                <div>
-                  <p className="font-medium text-[var(--text-primary)]">{item.label}</p>
-                  <p className="mt-1 text-sm text-[var(--text-secondary)]">{shortDate(item.date)} • {item.kind}</p>
-                </div>
-                <p className="font-semibold text-[var(--text-primary)]">-{formatCurrency(item.amount)}</p>
-              </div>
-            ))}
-            {!paydayPlan.items.length && (
-              <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-5 text-sm text-[var(--text-secondary)]">
-                Add a payday schedule in Settings to map bills, recurring charges, and expected spending before the next cheque lands.
-              </div>
-            )}
-          </div>
-        </ChartCard>
-      </section>
-
       <section className="grid gap-5 2xl:grid-cols-[2.2fr_0.8fr]">
-        <div className="rounded-[2.25rem] border border-[var(--border-soft)] bg-[var(--surface)] p-7 shadow-soft xl:p-8">
+        <div className="rounded-[2.35rem] border border-[var(--border-soft)] bg-[var(--surface)] p-7 shadow-soft xl:p-8">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Monthly Summary</p>
-              <h2 className="mt-2 text-[1.85rem] font-semibold text-[var(--text-primary)] sm:text-[2rem]">{monthLabel()}</h2>
+              <h2 className="mt-2 text-[2rem] font-semibold text-[var(--text-primary)] sm:text-[2.2rem]">{monthLabel()}</h2>
             </div>
-            <div className="max-w-full rounded-full bg-[var(--surface-muted)] px-4 py-2 text-sm text-[var(--text-secondary)] md:max-w-[22rem]">
+            <div className="max-w-full rounded-full bg-[var(--surface-muted)] px-4 py-2 text-sm text-[var(--text-secondary)] md:max-w-[24rem]">
               Running balance {formatCurrency(dashboardData.runningBalance)}
             </div>
           </div>
@@ -1234,19 +1080,28 @@ function DashboardPage({
         </div>
 
         <div className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
-          <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Weekly Recap</p>
+          <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Quick Recap</p>
           <div className="mt-4 space-y-4">
-            {dashboardData.weeklyRecap.map((week) => (
-              <div key={week.label} className="rounded-2xl bg-[var(--surface-muted)] p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="min-w-0 text-sm font-medium text-[var(--text-primary)]">{week.label}</span>
-                  <span className="text-right text-sm text-[var(--text-secondary)]">{formatCurrency(week.total)}</span>
-                </div>
-                <div className="mt-3 h-2 rounded-full bg-[var(--border-soft)]">
-                  <div className="h-2 rounded-full bg-[var(--accent)]" style={{ width: `${week.percent}%` }} />
-                </div>
-              </div>
-            ))}
+            <div className="rounded-2xl bg-[var(--surface-muted)] p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Vs last month</p>
+              <p className={cn('mt-3 text-xl font-semibold', recapData.current.delta >= 0 ? 'text-emerald-600' : 'text-rose-500')}>
+                {recapData.current.delta >= 0 ? '+' : '-'}
+                {formatCurrency(Math.abs(recapData.current.delta))}
+              </p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                {recapData.current.deltaPercentLabel} compared with {recapData.previous.label}
+              </p>
+            </div>
+            <div className="rounded-2xl bg-[var(--surface-muted)] p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Top spend</p>
+              <p className="mt-3 text-base font-semibold text-[var(--text-primary)]">{recapData.topCategory.name}</p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">{formatCurrency(recapData.topCategory.amount)} this month</p>
+            </div>
+            <div className="rounded-2xl bg-[var(--surface-muted)] p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Strongest month</p>
+              <p className="mt-3 text-base font-semibold text-[var(--text-primary)]">{recapData.bestMonth.label}</p>
+              <p className="mt-2 text-sm text-[var(--text-secondary)]">Net {formatCurrency(recapData.bestMonth.net)}</p>
+            </div>
           </div>
         </div>
       </section>
@@ -1296,6 +1151,19 @@ function DashboardPage({
                 <Bar dataKey="total" fill="var(--accent)" radius={[16, 16, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
+          </div>
+          <div className="mt-5 space-y-3">
+            {dashboardData.weeklyRecap.map((week) => (
+              <div key={week.label} className="rounded-2xl bg-[var(--surface-muted)] p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="min-w-0 text-sm font-medium text-[var(--text-primary)]">{week.label}</span>
+                  <span className="text-right text-sm text-[var(--text-secondary)]">{formatCurrency(week.total)}</span>
+                </div>
+                <div className="mt-3 h-2 rounded-full bg-[var(--border-soft)]">
+                  <div className="h-2 rounded-full bg-[var(--accent)]" style={{ width: `${week.percent}%` }} />
+                </div>
+              </div>
+            ))}
           </div>
         </ChartCard>
       </section>
@@ -1354,14 +1222,58 @@ function DashboardPage({
         </div>
       </ChartCard>
 
-      <ChartCard title="Insights" subtitle="Smart monthly callouts from your data">
-        <div className="grid gap-4 md:grid-cols-3">
+      <ChartCard title="Insights" subtitle="Sharper monthly callouts from your data">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {dashboardData.insights.map((insight) => (
-            <div key={insight.title} className="rounded-3xl bg-[var(--surface-muted)] p-5">
-              <p className="text-sm font-semibold text-[var(--text-primary)]">{insight.title}</p>
-              <p className="mt-2 text-sm text-[var(--text-secondary)]">{insight.body}</p>
+            <div key={insight.title} className="rounded-3xl bg-[linear-gradient(180deg,var(--surface-muted),rgba(255,255,255,0.55))] p-5 dark:bg-[linear-gradient(180deg,rgba(30,41,59,0.88),rgba(15,23,42,0.72))]">
+              <p className="text-xs uppercase tracking-[0.22em] text-[var(--text-muted)]">{insight.title}</p>
+              <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">{insight.body}</p>
             </div>
           ))}
+        </div>
+      </ChartCard>
+
+      <ChartCard title="Subscriptions" subtitle="Recurring charges kept lower on the dashboard">
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+            <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Monthly</p>
+            <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
+              {formatCurrency(subscriptionData.totalMonthlyCost)}
+            </p>
+            <p className="mt-2 text-sm text-[var(--text-secondary)]">
+              {subscriptionData.confirmed.length} confirmed and {subscriptionData.pending.length} pending detection{subscriptionData.pending.length === 1 ? '' : 's'}
+            </p>
+          </div>
+          <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+            <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Yearly</p>
+            <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
+              {formatCurrency(subscriptionData.totalYearlyCost)}
+            </p>
+            <p className="mt-2 text-sm text-[var(--text-secondary)]">
+              {subscriptionData.all.length ? `${subscriptionData.all[0].name} is your largest tracked subscription.` : 'No subscriptions detected yet.'}
+            </p>
+          </div>
+        </div>
+        <div className="mt-5 space-y-3">
+          {subscriptionData.all.slice(0, 4).map((subscription) => (
+            <div key={`${subscription.source}-${subscription.merchant_key}`} className="flex flex-wrap items-center justify-between gap-3 rounded-3xl bg-[var(--surface-muted)] p-4">
+              <div>
+                <p className="font-medium text-[var(--text-primary)]">{subscription.name}</p>
+                <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                  {subscription.frequency} • Last charged {shortDate(subscription.last_charged_date)}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="font-semibold text-[var(--text-primary)]">{formatCurrency(subscription.estimated_monthly_cost)}/mo</p>
+                <p className="text-sm text-[var(--text-secondary)]">{formatCurrency(subscription.yearly_cost)}/yr</p>
+              </div>
+            </div>
+          ))}
+          {!subscriptionData.all.length && (
+            <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-5 text-sm text-[var(--text-secondary)]">
+              Add a few repeated transactions and the app will start grouping likely subscriptions for review.
+            </div>
+          )}
         </div>
       </ChartCard>
     </div>
@@ -2261,122 +2173,108 @@ function TransactionsPage({
   )
 }
 
-function BillsPage({ bills, categories, formatCurrency, onDeleteBill, onSaveBill }) {
-  const visibleCategories = useMemo(() => dedupeCategories(categories), [categories])
-  const [form, setForm] = useState({
-    name: '',
-    amount: '',
-    due_date: today(),
-    category_id: visibleCategories[0]?.id ?? '',
-    paid: false,
-  })
-  const [editingId, setEditingId] = useState(null)
-  const selectedCategoryId = form.category_id || visibleCategories[0]?.id || ''
-
-  async function handleSubmit(event) {
-    event.preventDefault()
-    await onSaveBill({ ...form, category_id: selectedCategoryId }, editingId)
-    setEditingId(null)
-      setForm({
-        name: '',
-        amount: '',
-        due_date: today(),
-        category_id: visibleCategories[0]?.id ?? '',
-        paid: false,
-      })
-  }
-
+function RecapPage({ formatCurrency, recapData }) {
   return (
     <div className="space-y-6">
       <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
-        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Bills</p>
-        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Upcoming bill tracker</h2>
-        <form onSubmit={handleSubmit} className="mt-6 grid gap-4 lg:grid-cols-[1.2fr_0.8fr_0.8fr_1fr_auto_auto]">
-          <input type="text" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Bill name" className="field" required />
-          <input type="number" min="0" step="0.01" value={form.amount} onChange={(event) => setForm((current) => ({ ...current, amount: event.target.value }))} placeholder="Amount" className="field" required />
-          <input type="date" value={form.due_date} onChange={(event) => setForm((current) => ({ ...current, due_date: event.target.value }))} className="field" required />
-          <select value={selectedCategoryId} onChange={(event) => setForm((current) => ({ ...current, category_id: event.target.value }))} className="field select-field">
-            {visibleCategories.map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-          </select>
-          <label className="flex items-center justify-center rounded-2xl bg-[var(--surface-muted)] px-4 py-3 text-sm text-[var(--text-secondary)]">
-            <input type="checkbox" checked={form.paid} onChange={(event) => setForm((current) => ({ ...current, paid: event.target.checked }))} />
-            <span className="ml-2">Paid</span>
-          </label>
-          <button type="submit" className="primary-button">
-            {editingId ? 'Update bill' : 'Add bill'}
-          </button>
-        </form>
+        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Recap</p>
+        <h2 className="mt-2 text-3xl font-semibold text-[var(--text-primary)]">Month-by-month comparison</h2>
+        <p className="mt-3 max-w-3xl text-sm text-[var(--text-secondary)]">
+          Compare income, expenses, and net performance across the past year and see where this month is pulling ahead or slipping back.
+        </p>
+
+        <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <SummaryCard label="This Month" value={formatCurrency(recapData.current.net)} tone={recapData.current.net >= 0 ? 'positive' : 'negative'} />
+          <SummaryCard label="Last Month" value={formatCurrency(recapData.previous.net)} tone={recapData.previous.net >= 0 ? 'positive' : 'negative'} />
+          <SummaryCard label="Avg Income" value={formatCurrency(recapData.averageIncome)} tone="positive" />
+          <SummaryCard label="Avg Expenses" value={formatCurrency(recapData.averageExpenses)} tone="negative" />
+        </div>
       </section>
 
-      <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
-        <div className="space-y-4">
-          {bills.map((bill) => {
-            const daysUntilDue = getDaysUntil(bill.due_date)
-            const toneClass =
-              !bill.paid && daysUntilDue < 0
-                ? 'border-rose-300 bg-rose-50 dark:border-rose-900 dark:bg-rose-950/20'
-                : !bill.paid && daysUntilDue <= 7
-                  ? 'border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/20'
-                  : 'border-[var(--border-soft)] bg-[var(--surface-muted)]'
+      <section className="grid gap-6 xl:grid-cols-2">
+        <ChartCard title="Monthly Comparison" subtitle="Income and expenses over the last 12 months">
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={recapData.months}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-soft)" vertical={false} />
+                <XAxis dataKey="label" stroke="var(--text-muted)" />
+                <YAxis stroke="var(--text-muted)" />
+                <Tooltip formatter={(value) => formatCurrency(value)} />
+                <Bar dataKey="income" fill="#16a34a" radius={[10, 10, 0, 0]} />
+                <Bar dataKey="expenses" fill="var(--accent)" radius={[10, 10, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </ChartCard>
 
-            return (
-              <div key={bill.id} className={cn('rounded-3xl border p-5', toneClass)}>
+        <ChartCard title="Net Trend" subtitle="How your net result has moved month to month">
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={recapData.months}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-soft)" vertical={false} />
+                <XAxis dataKey="label" stroke="var(--text-muted)" />
+                <YAxis stroke="var(--text-muted)" />
+                <Tooltip formatter={(value) => formatCurrency(value)} />
+                <Line type="monotone" dataKey="net" stroke="var(--accent)" strokeWidth={3} dot={{ r: 4 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </ChartCard>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+        <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+          <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Monthly Breakdown</p>
+          <div className="mt-5 space-y-4">
+            {recapData.months.slice().reverse().slice(0, 6).map((month) => (
+              <div key={month.key} className="rounded-3xl bg-[var(--surface-muted)] p-5">
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div>
-                    <div className="flex items-center gap-3">
-                      <h3 className="text-lg font-semibold text-[var(--text-primary)]">{bill.name}</h3>
-                      <span className="rounded-full bg-white/70 px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
-                        {bill.paid ? 'Paid' : 'Unpaid'}
-                      </span>
-                    </div>
-                    <p className="mt-2 text-sm text-[var(--text-secondary)]">
-                      Due {shortDate(bill.due_date)} • {bill.category?.name ?? 'Uncategorized'}
+                    <p className="text-lg font-semibold text-[var(--text-primary)]">{month.fullLabel}</p>
+                    <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                      Income {formatCurrency(month.income)} ? Expenses {formatCurrency(month.expenses)}
                     </p>
-                    {!bill.paid && daysUntilDue < 0 && <p className="mt-2 text-sm text-rose-600">Overdue by {Math.abs(daysUntilDue)} day(s)</p>}
-                    {!bill.paid && daysUntilDue >= 0 && daysUntilDue <= 7 && <p className="mt-2 text-sm text-amber-700">Due within {daysUntilDue} day(s)</p>}
                   </div>
                   <div className="text-right">
-                    <p className="text-lg font-semibold text-[var(--text-primary)]">{formatCurrency(bill.amount)}</p>
-                    <div className="mt-3 flex gap-3 text-sm">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingId(bill.id)
-                          setForm({
-                            name: bill.name,
-                            amount: bill.amount,
-                            due_date: bill.due_date,
-                            category_id: bill.category_id,
-                            paid: bill.paid,
-                          })
-                        }}
-                        className="text-[var(--accent-strong)]"
-                      >
-                        Edit
-                      </button>
-                      <button type="button" onClick={() => onSaveBill({ ...bill, paid: !bill.paid }, bill.id)} className="text-[var(--accent-strong)]">
-                        Mark {bill.paid ? 'unpaid' : 'paid'}
-                      </button>
-                      <button type="button" onClick={() => onDeleteBill(bill.id)} className="text-rose-500">
-                        Delete
-                      </button>
-                    </div>
+                    <p className={cn('text-lg font-semibold', month.net >= 0 ? 'text-emerald-600' : 'text-rose-500')}>
+                      {month.net >= 0 ? '+' : '-'}{formatCurrency(Math.abs(month.net))}
+                    </p>
+                    <p className="mt-1 text-sm text-[var(--text-secondary)]">{month.deltaLabel}</p>
                   </div>
                 </div>
+                <div className="mt-4 h-2 rounded-full bg-[var(--border-soft)]">
+                  <div className="h-2 rounded-full bg-[var(--accent)]" style={{ width: `${month.expensePercent}%` }} />
+                </div>
               </div>
-            )
-          })}
+            ))}
+          </div>
+        </section>
 
-          {!bills.length && (
-            <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-8 text-center text-[var(--text-secondary)]">
-              Add your first bill to keep upcoming due dates visible.
-            </div>
-          )}
-        </div>
+        <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+          <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Category Changes</p>
+          <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">What changed this month</h2>
+          <div className="mt-5 space-y-3">
+            {recapData.categoryChanges.length ? (
+              recapData.categoryChanges.map((item) => (
+                <div key={item.name} className="rounded-3xl bg-[var(--surface-muted)] p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium text-[var(--text-primary)]">{item.name}</p>
+                      <p className="mt-1 text-sm text-[var(--text-secondary)]">{item.changeLabel}</p>
+                    </div>
+                    <p className={cn('text-sm font-semibold', item.diff >= 0 ? 'text-rose-500' : 'text-emerald-600')}>
+                      {item.diff >= 0 ? '+' : '-'}{formatCurrency(Math.abs(item.diff))}
+                    </p>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-5 text-sm text-[var(--text-secondary)]">
+                Add transactions in multiple months to unlock category comparisons here.
+              </div>
+            )}
+          </div>
+        </section>
       </section>
     </div>
   )
@@ -3459,7 +3357,7 @@ function AuthScreen({ notice, onNotice }) {
           </p>
 
           <div className="mt-8 grid gap-4 md:grid-cols-3">
-            <FeatureChip title="Quick add" description="Income, bills, budgets, and recurring entries in a few taps." />
+            <FeatureChip title="Quick add" description="Income, expenses, budgets, and recurring entries in a few taps." />
             <FeatureChip title="Goal tracking" description="Carry monthly contributions forward." />
             <FeatureChip title="CSV import" description="Preview Google Sheets rows before saving." />
           </div>
@@ -3908,116 +3806,6 @@ function detectSubscriptionCandidates(transactions, categoryMap) {
     .sort((left, right) => right.estimated_monthly_cost - left.estimated_monthly_cost)
 }
 
-function buildPaydayPlan({ bills, recurringTransactions, settings, transactions }) {
-  const currentBalance = transactions.reduce(
-    (sum, transaction) => sum + (transaction.type === 'income' ? Number(transaction.amount) : -Number(transaction.amount)),
-    0,
-  )
-  const nextPayday = resolveNextPayday(settings)
-  const safetyAmount = Number(settings.safety_amount || 0)
-
-  if (!nextPayday) {
-    return {
-      currentBalance,
-      items: [],
-      message: 'Add a payday schedule in Settings to see your pay-cycle projection.',
-      nextPayday: null,
-      projectedAvailable: currentBalance,
-      scheduleLabel: 'No payday schedule set',
-      status: 'safe',
-    }
-  }
-
-  const recurringItems = recurringTransactions
-    .filter((item) => item.active && item.type === 'expense')
-    .flatMap((item) => expandRecurringUntil(item, nextPayday))
-  const billItems = bills
-    .filter((bill) => !bill.paid && compareDateOnly(bill.due_date, nextPayday) <= 0 && compareDateOnly(bill.due_date, today()) >= 0)
-    .map((bill) => ({ date: bill.due_date, amount: Number(bill.amount), label: bill.name, kind: 'bill' }))
-  const expectedSpendAmount = estimateExpectedSpendUntilPayday(transactions, nextPayday)
-  const expectedSpendDate = nextPayday
-  const items = [...billItems, ...recurringItems]
-  if (expectedSpendAmount > 0) {
-    items.push({ date: expectedSpendDate, amount: expectedSpendAmount, label: 'Expected everyday spending', kind: 'forecast' })
-  }
-  items.sort((left, right) => left.date.localeCompare(right.date))
-
-  const projectedAvailable = currentBalance - items.reduce((sum, item) => sum + Number(item.amount), 0)
-  const status = projectedAvailable < 0 ? 'danger' : projectedAvailable < safetyAmount ? 'warning' : 'safe'
-  const message =
-    status === 'danger'
-      ? 'Projected balance drops below zero before your next payday.'
-      : status === 'warning'
-        ? `Projected balance falls below your ${currency(safetyAmount, settings.currency || 'CAD')} safety amount.`
-        : 'Projected balance stays above your safety floor through the pay cycle.'
-
-  return {
-    currentBalance,
-    items,
-    message,
-    nextPayday,
-    projectedAvailable,
-    scheduleLabel: describePaydaySchedule(settings),
-    status,
-  }
-}
-
-function resolveNextPayday(settings) {
-  const frequency = settings.payday_frequency ?? 'monthly'
-  const anchorDate = settings.payday_anchor_date || today()
-  const todayValue = today()
-
-  if (frequency === 'weekly' || frequency === 'biweekly') {
-    const interval = frequency === 'weekly' ? 7 : 14
-    let cursor = anchorDate
-    while (compareDateOnly(cursor, todayValue) < 0) {
-      cursor = addDaysToDateValue(cursor, interval)
-    }
-    return cursor
-  }
-
-  const dayOfMonth = Number(settings.payday_day_of_month || new Date(`${anchorDate}T00:00:00`).getDate())
-  const current = new Date(`${todayValue}T00:00:00`)
-  let candidate = new Date(current.getFullYear(), current.getMonth(), Math.min(dayOfMonth, daysInMonth(current.getFullYear(), current.getMonth())))
-  if (toDateInputValue(candidate) < todayValue) {
-    candidate = new Date(
-      current.getFullYear(),
-      current.getMonth() + 1,
-      Math.min(dayOfMonth, daysInMonth(current.getFullYear(), current.getMonth() + 1)),
-    )
-  }
-  return toDateInputValue(candidate)
-}
-
-function describePaydaySchedule(settings) {
-  if ((settings.payday_frequency ?? 'monthly') === 'monthly') {
-    return `Monthly on day ${Number(settings.payday_day_of_month || new Date().getDate())}`
-  }
-  return `${settings.payday_frequency ?? 'monthly'} from ${shortDate(settings.payday_anchor_date || today())}`
-}
-
-function expandRecurringUntil(item, endDate) {
-  const items = []
-  let nextDate = item.next_date
-  while (nextDate && compareDateOnly(nextDate, endDate) <= 0) {
-    if (compareDateOnly(nextDate, today()) >= 0) {
-      items.push({ date: nextDate, amount: Number(item.amount), label: item.description, kind: 'recurring' })
-    }
-    nextDate = addRecurringInterval(nextDate, item.frequency)
-  }
-  return items
-}
-
-function estimateExpectedSpendUntilPayday(transactions, nextPayday) {
-  const lookbackStart = addDaysToDateValue(today(), -30)
-  const recentExpenses = transactions.filter(
-    (transaction) => transaction.type === 'expense' && compareDateOnly(transaction.date, lookbackStart) >= 0 && compareDateOnly(transaction.date, today()) <= 0,
-  )
-  const total = recentExpenses.reduce((sum, transaction) => sum + Number(transaction.amount), 0)
-  const dailyAverage = total / 30
-  return Number((dailyAverage * Math.max(daysBetween(today(), nextPayday), 0)).toFixed(2))
-}
-
 function buildMerchantKey(value) {
   return normalizeText(value)
     .replace(/[^a-z0-9\s]/g, ' ')
@@ -4033,16 +3821,6 @@ function prettifyMerchantName(value) {
 
 function daysBetween(startDate, endDate) {
   return Math.round((new Date(`${endDate}T00:00:00`).getTime() - new Date(`${startDate}T00:00:00`).getTime()) / 86400000)
-}
-
-function addDaysToDateValue(dateValue, days) {
-  const nextDate = new Date(`${dateValue}T00:00:00`)
-  nextDate.setDate(nextDate.getDate() + days)
-  return toDateInputValue(nextDate)
-}
-
-function daysInMonth(year, monthIndex) {
-  return new Date(year, monthIndex + 1, 0).getDate()
 }
 
 function parseImportDateValue(rawDate) {
@@ -4302,6 +4080,111 @@ function summarizeExpenseCategories(transactions, categoryMap) {
       map.set(key, current)
     })
   return map
+}
+
+function buildMonthlyRecapData(transactions, categoryMap) {
+  const months = []
+  const now = new Date(`${today()}T00:00:00`)
+
+  for (let offset = 11; offset >= 0; offset -= 1) {
+    const cursor = new Date(now.getFullYear(), now.getMonth() - offset, 1)
+    const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`
+    months.push({
+      key,
+      label: cursor.toLocaleString('en-US', { month: 'short' }),
+      fullLabel: cursor.toLocaleString('en-US', { month: 'long', year: 'numeric' }),
+      income: 0,
+      expenses: 0,
+      net: 0,
+    })
+  }
+
+  const monthMap = new Map(months.map((month) => [month.key, month]))
+  transactions.forEach((transaction) => {
+    const key = transaction.date.slice(0, 7)
+    const month = monthMap.get(key)
+    if (!month) {
+      return
+    }
+
+    if (transaction.type === 'income') {
+      month.income += Number(transaction.amount)
+    } else {
+      month.expenses += Number(transaction.amount)
+    }
+  })
+
+  months.forEach((month, index) => {
+    month.net = month.income - month.expenses
+    const previous = months[index - 1]
+    const delta = previous ? month.net - previous.net : 0
+    month.delta = delta
+    month.deltaLabel = previous
+      ? `${delta >= 0 ? 'Up' : 'Down'} ${currency(Math.abs(delta))} vs ${previous.label}`
+      : 'Starting point'
+  })
+
+  const maxExpenses = Math.max(...months.map((month) => month.expenses), 1)
+  months.forEach((month) => {
+    month.expensePercent = month.expenses ? Math.max((month.expenses / maxExpenses) * 100, 8) : 0
+  })
+
+  const current = months.at(-1) ?? { label: monthLabel(), income: 0, expenses: 0, net: 0, delta: 0 }
+  const previous = months.at(-2) ?? { label: 'Last month', income: 0, expenses: 0, net: 0 }
+  const currentTransactions = transactions.filter((transaction) => transaction.date.startsWith(current.key))
+  const previousTransactions = transactions.filter((transaction) => transaction.date.startsWith(previous.key ?? ''))
+
+  const currentCategories = summarizeExpenseCategories(currentTransactions, categoryMap)
+  const previousCategories = summarizeExpenseCategories(previousTransactions, categoryMap)
+  const topCategory = [...currentCategories.values()].sort((left, right) => right.amount - left.amount)[0] ?? {
+    name: 'No expenses yet',
+    amount: 0,
+  }
+
+  const categoryKeys = new Set([...currentCategories.keys(), ...previousCategories.keys()])
+  const categoryChanges = [...categoryKeys]
+    .map((key) => {
+      const currentAmount = currentCategories.get(key)?.amount ?? 0
+      const previousAmount = previousCategories.get(key)?.amount ?? 0
+      const name = currentCategories.get(key)?.name ?? previousCategories.get(key)?.name ?? 'Uncategorized'
+      const diff = currentAmount - previousAmount
+      return {
+        name,
+        diff,
+        changeLabel:
+          previousAmount > 0
+            ? `${currency(currentAmount)} this month vs ${currency(previousAmount)} last month`
+            : `${currency(currentAmount)} this month`,
+      }
+    })
+    .filter((item) => item.diff !== 0 || item.changeLabel !== `${currency(0)} this month`)
+    .sort((left, right) => Math.abs(right.diff) - Math.abs(left.diff))
+    .slice(0, 5)
+
+  const averageIncome = months.reduce((sum, month) => sum + month.income, 0) / months.length
+  const averageExpenses = months.reduce((sum, month) => sum + month.expenses, 0) / months.length
+  const bestMonth = [...months].sort((left, right) => right.net - left.net)[0] ?? current
+  const deltaPercentLabel =
+    previous.net !== 0
+      ? `${Math.abs((current.delta / previous.net) * 100).toFixed(0)}% ${current.delta >= 0 ? 'better' : 'lower'}`
+      : current.delta === 0
+        ? 'Flat month'
+        : 'Fresh comparison'
+
+  return {
+    months,
+    current: {
+      ...current,
+      delta: current.delta ?? 0,
+      deltaPercentLabel,
+    },
+    previous,
+    topCategory,
+    categoryChanges,
+    averageIncome,
+    averageExpenses,
+    bestMonth,
+  }
 }
 
 function enrichGoals(goals, contributions) {
