@@ -1813,6 +1813,14 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
   const [editingId, setEditingId] = useState(null)
   const [contributionDrafts, setContributionDrafts] = useState({})
   const now = new Date()
+  const totalSaved = goals.reduce((sum, goal) => sum + Number(goal.current_amount || 0), 0)
+  const totalTarget = goals.reduce((sum, goal) => sum + Number(goal.target_amount || 0), 0)
+  const closestGoal = [...goals]
+    .sort(
+      (left, right) =>
+        Math.max(Number(left.target_amount) - Number(left.current_amount || 0), 0) -
+        Math.max(Number(right.target_amount) - Number(right.current_amount || 0), 0),
+    )[0]
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -1824,16 +1832,41 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
   return (
     <div className="space-y-6">
       <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
-        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Goals</p>
-        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Savings goals with monthly carry-over</h2>
-        <form onSubmit={handleSubmit} className="mt-6 grid gap-4 lg:grid-cols-[1.3fr_1fr_1fr_auto]">
-          <input type="text" placeholder="Goal name" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} className="field" required />
-          <input type="number" min="0" step="0.01" placeholder="Target amount" value={form.target_amount} onChange={(event) => setForm((current) => ({ ...current, target_amount: event.target.value }))} className="field" required />
-          <input type="date" value={form.deadline} onChange={(event) => setForm((current) => ({ ...current, deadline: event.target.value }))} className="field" />
-          <button type="submit" className="primary-button">
-            {editingId ? 'Update goal' : 'Create goal'}
-          </button>
-        </form>
+        <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+          <div>
+            <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Goals</p>
+            <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Savings goals with monthly carry-over</h2>
+            <p className="mt-3 max-w-xl text-sm text-[var(--text-secondary)]">
+              Track the total you have saved, keep your next milestone visible, and add monthly contributions without digging through the page.
+            </p>
+            <div className="mt-6 grid gap-3 sm:grid-cols-3">
+              <div className="rounded-3xl bg-[var(--surface-muted)] p-4">
+                <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Saved</p>
+                <p className="mt-3 text-xl font-semibold text-[var(--text-primary)]">{formatCurrency(totalSaved)}</p>
+              </div>
+              <div className="rounded-3xl bg-[var(--surface-muted)] p-4">
+                <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Target</p>
+                <p className="mt-3 text-xl font-semibold text-[var(--text-primary)]">{formatCurrency(totalTarget)}</p>
+              </div>
+              <div className="rounded-3xl bg-[var(--surface-muted)] p-4">
+                <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Closest</p>
+                <p className="mt-3 text-sm font-semibold text-[var(--text-primary)]">{closestGoal?.name ?? 'No goals yet'}</p>
+              </div>
+            </div>
+          </div>
+
+          <form onSubmit={handleSubmit} className="rounded-[1.75rem] bg-[var(--surface-muted)] p-5">
+            <p className="text-sm font-semibold text-[var(--text-primary)]">{editingId ? 'Edit goal' : 'Create a goal'}</p>
+            <div className="mt-4 grid gap-4">
+              <input type="text" placeholder="Goal name" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} className="field" required />
+              <input type="number" min="0" step="0.01" placeholder="Target amount" value={form.target_amount} onChange={(event) => setForm((current) => ({ ...current, target_amount: event.target.value }))} className="field" required />
+              <input type="date" value={form.deadline} onChange={(event) => setForm((current) => ({ ...current, deadline: event.target.value }))} className="field" />
+              <button type="submit" className="primary-button">
+                {editingId ? 'Update goal' : 'Create goal'}
+              </button>
+            </div>
+          </form>
+        </div>
       </section>
 
       <div className="grid gap-6 xl:grid-cols-2">
@@ -1843,10 +1876,17 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
 
           return (
             <section key={goal.id} className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
-              <div className="flex items-start justify-between gap-4">
+              <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
-                  <h3 className="text-xl font-semibold text-[var(--text-primary)]">{goal.name}</h3>
-                  <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <h3 className="text-xl font-semibold text-[var(--text-primary)]">{goal.name}</h3>
+                    {goal.deadline && (
+                      <span className="rounded-full bg-[var(--surface-muted)] px-3 py-1 text-xs uppercase tracking-[0.2em] text-[var(--text-secondary)]">
+                        Due {shortDate(goal.deadline)}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-3 text-sm text-[var(--text-secondary)]">
                     {formatCurrency(goal.current_amount)} saved of {formatCurrency(goal.target_amount)}
                   </p>
                   <p className="mt-1 text-sm text-[var(--text-secondary)]">
@@ -1879,48 +1919,51 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
                 <div className="h-3 rounded-full bg-[var(--accent)]" style={{ width: `${progress}%` }} />
               </div>
 
-              <div className="mt-6 grid gap-3 md:grid-cols-4">
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="Add amount"
-                  value={draft.amount}
-                  onChange={(event) =>
-                    setContributionDrafts((current) => ({
-                      ...current,
-                      [goal.id]: { ...draft, amount: event.target.value },
-                    }))
-                  }
-                  className="field"
-                />
-                <input
-                  type="number"
-                  min="1"
-                  max="12"
-                  value={draft.month}
-                  onChange={(event) =>
-                    setContributionDrafts((current) => ({
-                      ...current,
-                      [goal.id]: { ...draft, month: Number(event.target.value) },
-                    }))
-                  }
-                  className="field"
-                />
-                <input
-                  type="number"
-                  value={draft.year}
-                  onChange={(event) =>
-                    setContributionDrafts((current) => ({
-                      ...current,
-                      [goal.id]: { ...draft, year: Number(event.target.value) },
-                    }))
-                  }
-                  className="field"
-                />
-                <button type="button" onClick={() => onAddContribution(goal.id, draft.amount, draft.month, draft.year)} className="primary-button">
-                  Add contribution
-                </button>
+              <div className="mt-6 rounded-[1.5rem] bg-[var(--surface-muted)] p-4">
+                <p className="text-sm font-medium text-[var(--text-primary)]">Monthly contribution</p>
+                <div className="mt-4 grid gap-3 md:grid-cols-4">
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Add amount"
+                    value={draft.amount}
+                    onChange={(event) =>
+                      setContributionDrafts((current) => ({
+                        ...current,
+                        [goal.id]: { ...draft, amount: event.target.value },
+                      }))
+                    }
+                    className="field"
+                  />
+                  <input
+                    type="number"
+                    min="1"
+                    max="12"
+                    value={draft.month}
+                    onChange={(event) =>
+                      setContributionDrafts((current) => ({
+                        ...current,
+                        [goal.id]: { ...draft, month: Number(event.target.value) },
+                      }))
+                    }
+                    className="field"
+                  />
+                  <input
+                    type="number"
+                    value={draft.year}
+                    onChange={(event) =>
+                      setContributionDrafts((current) => ({
+                        ...current,
+                        [goal.id]: { ...draft, year: Number(event.target.value) },
+                      }))
+                    }
+                    className="field"
+                  />
+                  <button type="button" onClick={() => onAddContribution(goal.id, draft.amount, draft.month, draft.year)} className="primary-button">
+                    Add contribution
+                  </button>
+                </div>
               </div>
 
               <div className="mt-5 space-y-3">
@@ -1970,6 +2013,22 @@ function SettingsPage({
     emoji: '✨',
     type: 'expense',
   })
+  const expenseCategoriesForBudgets = useMemo(() => {
+    const seen = new Set()
+    return categories.filter((category) => {
+      if (category.type !== 'expense') {
+        return false
+      }
+
+      const key = `${category.type}:${normalizeText(category.name)}`
+      if (seen.has(key)) {
+        return false
+      }
+
+      seen.add(key)
+      return true
+    })
+  }, [categories])
 
   return (
     <div className="space-y-6">
@@ -2052,9 +2111,7 @@ function SettingsPage({
         <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Budget Limits</p>
         <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Monthly caps by expense category</h2>
         <div className="mt-6 space-y-3">
-          {categories
-            .filter((category) => category.type === 'expense')
-            .map((category) => (
+          {expenseCategoriesForBudgets.map((category) => (
               <div key={category.id} className="grid gap-3 rounded-3xl bg-[var(--surface-muted)] p-4 lg:grid-cols-[1fr_0.8fr_auto]">
                 <div className="flex items-center gap-3">
                   <span className="text-xl">{category.emoji}</span>
