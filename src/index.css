@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --bg-app: #f3f6fb;
+  --surface: rgba(255, 255, 255, 0.92);
+  --surface-muted: rgba(241, 245, 249, 0.9);
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --border-soft: rgba(148, 163, 184, 0.26);
+  --accent: #2563eb;
+  --accent-soft: rgba(37, 99, 235, 0.14);
+  --accent-strong: #1d4ed8;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg-app: #0b1220;
+  --surface: rgba(15, 23, 42, 0.88);
+  --surface-muted: rgba(30, 41, 59, 0.82);
+  --text-primary: #e2e8f0;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --border-soft: rgba(148, 163, 184, 0.2);
+}
+
+:root[data-accent='green'] {
+  --accent: #16a34a;
+  --accent-soft: rgba(22, 163, 74, 0.14);
+  --accent-strong: #15803d;
+}
+
+:root[data-accent='purple'] {
+  --accent: #7c3aed;
+  --accent-soft: rgba(124, 58, 237, 0.14);
+  --accent-strong: #6d28d9;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "Plus Jakarta Sans", "Segoe UI", sans-serif;
+  background: var(--bg-app);
+  color: var(--text-primary);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.field {
+  width: 100%;
+  border-radius: 1rem;
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+  color: var(--text-primary);
+  padding: 0.85rem 1rem;
+  outline: none;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.field:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.primary-button,
+.secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0.85rem 1.25rem;
+  border: 0;
+  cursor: pointer;
+  transition: transform 160ms ease, opacity 160ms ease, background-color 160ms ease;
+}
+
+.primary-button {
+  background: var(--accent);
+  color: white;
+}
+
+.secondary-button {
+  background: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.primary-button:hover,
+.secondary-button:hover {
+  transform: translateY(-1px);
+}
+
+.primary-button:disabled,
+.secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+  transform: none;
+}
+
+.shadow-soft {
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.08);
+}
