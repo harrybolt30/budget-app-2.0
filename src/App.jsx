@@ -1383,9 +1383,12 @@ function TransactionsPage({
   const [pageInput, setPageInput] = useState(1)
   const [form, setForm] = useState(buildTransactionForm(categories))
   const [importState, setImportState] = useState({
+    fileName: '',
     rows: [],
     assumedMonth: new Date().getMonth(),
     assumedYear: new Date().getFullYear(),
+    defaultType: 'expense',
+    applyTypeToAll: false,
   })
 
   const visibleCategories = useMemo(() => dedupeCategories(categories), [categories])
@@ -1508,30 +1511,55 @@ function TransactionsPage({
           return map
         }, {})
 
-        const parsedRows = data.map((row, index) => {
-          const rawDate = row[headerMap.date] ?? ''
-          const rawCategory = row[headerMap.category] ?? 'Other'
-          const rawName = row[headerMap.name] ?? ''
-          const parsedDateInfo = parseImportDateValue(rawDate)
-
-          return {
+        const parsedRows = data.map((row, index) =>
+          buildImportRow({
             id: `import-${index}`,
-            include: true,
-            description: String(rawName).trim(),
-            amount: parseAmount(row[headerMap.amount]),
-            category: String(rawCategory).trim() || 'Other',
-            type: 'expense',
-            rawDate: String(rawDate).trim(),
-            needsDateContext: parsedDateInfo.mode !== 'full',
-            dateMode: parsedDateInfo.mode,
-            parsedMonth: parsedDateInfo.month,
-            parsedDay: parsedDateInfo.day,
-          }
-        })
+            rawAmount: row[headerMap.amount],
+            rawCategory: row[headerMap.category],
+            rawDate: row[headerMap.date],
+            rawName: row[headerMap.name],
+            defaultType: 'expense',
+          }),
+        )
 
-        setImportState((current) => ({ ...current, rows: parsedRows }))
+        setImportState((current) => ({
+          ...current,
+          fileName: file.name,
+          rows: parsedRows,
+        }))
       },
     })
+  }
+
+  function updateImportRow(rowId, changes) {
+    setImportState((current) => ({
+      ...current,
+      rows: current.rows.map((row) => {
+        if (row.id !== rowId) {
+          return row
+        }
+
+        const nextRow = { ...row, ...changes }
+        if (Object.prototype.hasOwnProperty.call(changes, 'rawDate')) {
+          const parsedDateInfo = parseImportDateValue(changes.rawDate)
+          nextRow.needsDateContext = parsedDateInfo.mode !== 'full'
+          nextRow.dateMode = parsedDateInfo.mode
+          nextRow.parsedMonth = parsedDateInfo.month
+          nextRow.parsedDay = parsedDateInfo.day
+        }
+        if (Object.prototype.hasOwnProperty.call(changes, 'rawAmount')) {
+          nextRow.amount = parseAmount(changes.rawAmount)
+        }
+        return nextRow
+      }),
+    }))
+  }
+
+  function applyImportTypeToIncludedRows() {
+    setImportState((current) => ({
+      ...current,
+      rows: current.rows.map((row) => (row.include ? { ...row, type: current.defaultType } : row)),
+    }))
   }
 
   async function confirmImport() {
@@ -1543,12 +1571,21 @@ function TransactionsPage({
       }))
 
     await onImportTransactions(selectedRows)
-    setImportState((current) => ({ ...current, rows: [] }))
+    setImportState((current) => ({ ...current, fileName: '', rows: [] }))
   }
+
+  const importSummary = useMemo(
+    () => ({
+      selectedCount: importState.rows.filter((row) => row.include).length,
+      selectedTotal: importState.rows.filter((row) => row.include).reduce((sum, row) => sum + Number(row.amount || 0), 0),
+      needsDateCount: importState.rows.filter((row) => row.include && row.needsDateContext).length,
+    }),
+    [importState.rows],
+  )
 
   return (
     <div className="space-y-6">
-      <section className="grid gap-6 xl:grid-cols-[1.1fr_1.4fr]">
+      <section className="space-y-6">
         <form onSubmit={submitForm} className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -1782,12 +1819,14 @@ function TransactionsPage({
           </div>
         </form>
 
-        <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+        <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-7 shadow-soft xl:p-8">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">CSV Import</p>
-              <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Google Sheets upload</h2>
-              <p className="mt-2 text-sm text-[var(--text-secondary)]">Expected headers: Name, Amount, Category, Date.</p>
+              <h2 className="mt-2 text-3xl font-semibold text-[var(--text-primary)]">Google Sheets upload and review</h2>
+              <p className="mt-2 max-w-2xl text-sm text-[var(--text-secondary)]">
+                Upload a CSV, set smart defaults, clean up rows in the preview, and import only what you want. Expected headers: Name, Amount, Category, Date.
+              </p>
             </div>
             <label className="inline-flex cursor-pointer items-center rounded-full bg-[var(--accent-soft)] px-4 py-2 text-sm font-medium text-[var(--accent-strong)]">
               Upload CSV
@@ -1809,48 +1848,122 @@ function TransactionsPage({
             </div>
           ) : (
             <div className="mt-6 space-y-4">
-              {importState.rows.some((row) => row.needsDateContext) && (
-                <div className="grid gap-3 rounded-2xl bg-[var(--surface-muted)] p-4 md:grid-cols-2">
-                  <label className="space-y-2 text-sm text-[var(--text-secondary)]">
-                    <span>Assumed month</span>
-                    <select
-                      value={importState.assumedMonth}
-                      onChange={(event) =>
-                        setImportState((current) => ({
-                          ...current,
-                          assumedMonth: Number(event.target.value),
-                        }))
-                      }
+              <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+                <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-[var(--text-primary)]">Import options</p>
+                      <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                        {importState.fileName ? `Reviewing ${importState.fileName}` : 'Review your imported CSV file.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setImportState((current) => ({ ...current, fileName: '', rows: [] }))}
+                      className="text-sm text-[var(--accent-strong)]"
+                    >
+                      Clear file
+                    </button>
+                  </div>
+                  <div className="mt-4 grid gap-3 md:grid-cols-3">
+                    <label className="space-y-2 text-sm text-[var(--text-secondary)]">
+                      <span>Default type</span>
+                      <select
+                        value={importState.defaultType}
+                        onChange={(event) =>
+                          setImportState((current) => ({ ...current, defaultType: event.target.value }))
+                        }
+                        className="field select-field"
+                      >
+                        <option value="expense">Expense</option>
+                        <option value="income">Income</option>
+                      </select>
+                    </label>
+                    <label className="space-y-2 text-sm text-[var(--text-secondary)]">
+                      <span>Assumed month</span>
+                      <select
+                        value={importState.assumedMonth}
+                        onChange={(event) =>
+                          setImportState((current) => ({
+                            ...current,
+                            assumedMonth: Number(event.target.value),
+                          }))
+                        }
                         className="field select-field"
                       >
                         {Array.from({ length: 12 }).map((_, monthIndex) => (
                           <option key={monthIndex} value={monthIndex}>
                             {new Date(2026, monthIndex, 1).toLocaleString('en-US', { month: 'long' })}
                           </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="space-y-2 text-sm text-[var(--text-secondary)]">
-                    <span>Assumed year</span>
-                    <input
-                      type="number"
-                      value={importState.assumedYear}
-                      onChange={(event) =>
-                        setImportState((current) => ({
-                          ...current,
-                          assumedYear: Number(event.target.value),
-                        }))
-                      }
-                      className="field"
+                        ))}
+                      </select>
+                    </label>
+                    <label className="space-y-2 text-sm text-[var(--text-secondary)]">
+                      <span>Assumed year</span>
+                      <input
+                        type="number"
+                        value={importState.assumedYear}
+                        onChange={(event) =>
+                          setImportState((current) => ({
+                            ...current,
+                            assumedYear: Number(event.target.value),
+                          }))
+                        }
+                        className="field"
                       />
                     </label>
-                    <p className="md:col-span-2 text-sm text-[var(--text-secondary)]">
-                      Use this when the CSV date is only a day number like `4`, or a month/day value like `4/15` without a year.
-                    </p>
                   </div>
-                )}
+                  <div className="mt-4 flex flex-wrap gap-3">
+                    <button type="button" onClick={applyImportTypeToIncludedRows} className="secondary-button">
+                      Apply type to selected rows
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setImportState((current) => ({
+                          ...current,
+                          rows: current.rows.map((row) => ({ ...row, include: true })),
+                        }))
+                      }
+                      className="secondary-button"
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setImportState((current) => ({
+                          ...current,
+                          rows: current.rows.map((row) => ({ ...row, include: false })),
+                        }))
+                      }
+                      className="secondary-button"
+                    >
+                      Clear selection
+                    </button>
+                  </div>
+                  <p className="mt-4 text-sm text-[var(--text-secondary)]">
+                    Partial dates like `4` or `4/15` will use the assumed month/year where needed, and you can edit any row directly below before importing.
+                  </p>
+                </div>
 
-              <div className="max-h-[26rem] overflow-auto rounded-3xl border border-[var(--border-soft)]">
+                <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-1">
+                  <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+                    <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Selected rows</p>
+                    <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">{importSummary.selectedCount}</p>
+                  </div>
+                  <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+                    <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Selected total</p>
+                    <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">{formatCurrency(importSummary.selectedTotal)}</p>
+                  </div>
+                  <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+                    <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Dates needing context</p>
+                    <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">{importSummary.needsDateCount}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="max-h-[32rem] overflow-auto rounded-3xl border border-[var(--border-soft)]">
                 <table className="min-w-full text-left text-sm">
                   <thead className="bg-[var(--surface-muted)] text-[var(--text-secondary)]">
                     <tr>
@@ -1896,29 +2009,59 @@ function TransactionsPage({
                             <option value="income">Income</option>
                           </select>
                         </td>
-                        <td className="px-3 py-3">{row.description}</td>
-                        <td className="px-3 py-3">{row.category}</td>
-                          <td className="px-3 py-3">
-                            {row.needsDateContext
-                              ? `${new Date(
-                                  importState.assumedYear,
-                                  row.dateMode === 'month-day' ? Number(row.parsedMonth) - 1 : importState.assumedMonth,
-                                  row.dateMode === 'month-day' ? Number(row.parsedDay) : Number(row.rawDate),
-                                ).toLocaleDateString('en-US', {
-                                  month: 'short',
-                                  day: 'numeric',
-                                  year: 'numeric',
-                                })} (assumed)`
-                            : row.rawDate}
+                        <td className="px-3 py-3 min-w-52">
+                          <input
+                            type="text"
+                            value={row.description}
+                            onChange={(event) => updateImportRow(row.id, { description: event.target.value })}
+                            className="field"
+                          />
                         </td>
-                        <td className="px-3 py-3">{formatCurrency(row.amount)}</td>
+                        <td className="px-3 py-3 min-w-44">
+                          <input
+                            type="text"
+                            value={row.category}
+                            list="csv-import-categories"
+                            onChange={(event) => updateImportRow(row.id, { category: event.target.value })}
+                            className="field"
+                          />
+                        </td>
+                        <td className="px-3 py-3 min-w-48">
+                          <div className="space-y-2">
+                            <input
+                              type="text"
+                              value={row.rawDate}
+                              onChange={(event) => updateImportRow(row.id, { rawDate: event.target.value })}
+                              className="field"
+                            />
+                            <p className="text-xs text-[var(--text-muted)]">
+                              {formatImportPreviewDate(row, importState.assumedMonth, importState.assumedYear)}
+                            </p>
+                          </div>
+                        </td>
+                        <td className="px-3 py-3 min-w-36">
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={row.amount}
+                            onChange={(event) => updateImportRow(row.id, { rawAmount: event.target.value })}
+                            className="field"
+                          />
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
 
-              <button type="button" onClick={confirmImport} className="primary-button">
+              <datalist id="csv-import-categories">
+                {visibleCategories.map((category) => (
+                  <option key={category.id} value={category.name} />
+                ))}
+              </datalist>
+
+              <button type="button" onClick={confirmImport} className="primary-button" disabled={!importSummary.selectedCount}>
                 Confirm import
               </button>
             </div>
@@ -3696,6 +3839,25 @@ function parseImportDateValue(rawDate) {
   return { mode: 'full', day: null, month: null }
 }
 
+function buildImportRow({ defaultType = 'expense', id, rawAmount, rawCategory, rawDate, rawName }) {
+  const parsedDateInfo = parseImportDateValue(rawDate)
+
+  return {
+    id,
+    include: true,
+    description: String(rawName ?? '').trim(),
+    amount: parseAmount(rawAmount),
+    category: String(rawCategory ?? '').trim() || 'Other',
+    type: defaultType,
+    rawDate: String(rawDate ?? '').trim(),
+    rawAmount: String(rawAmount ?? '').trim(),
+    needsDateContext: parsedDateInfo.mode !== 'full',
+    dateMode: parsedDateInfo.mode,
+    parsedMonth: parsedDateInfo.month,
+    parsedDay: parsedDateInfo.day,
+  }
+}
+
 function resolveImportedDate(row, assumedMonth, assumedYear) {
   if (row.dateMode === 'day-only') {
     return toDateInputValue(new Date(assumedYear, assumedMonth, Number(row.rawDate)))
@@ -3706,6 +3868,11 @@ function resolveImportedDate(row, assumedMonth, assumedYear) {
   }
 
   return toDateInputValue(new Date(row.rawDate))
+}
+
+function formatImportPreviewDate(row, assumedMonth, assumedYear) {
+  const resolvedDate = resolveImportedDate(row, assumedMonth, assumedYear)
+  return row.needsDateContext ? `${shortDate(resolvedDate)} (assumed)` : shortDate(resolvedDate)
 }
 
 function buildDashboardData(transactions, budgetMap, goals, categoryMap) {
