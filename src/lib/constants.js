@@ -37,6 +37,7 @@ export const NAV_ITEMS = [
   { id: 'transactions', label: 'Transactions' },
   { id: 'bills', label: 'Bills' },
   { id: 'goals', label: 'Goals' },
+  { id: 'savings', label: 'Savings' },
   { id: 'settings', label: 'Settings' },
 ]
 

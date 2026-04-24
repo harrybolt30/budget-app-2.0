@@ -347,6 +347,7 @@ function BudgetApp({ user, notice, onNotice }) {
   )
 
   const enrichedGoals = useMemo(() => enrichGoals(goals, contributions), [contributions, goals])
+  const savingsData = useMemo(() => buildSavingsData(enrichedGoals), [enrichedGoals])
 
   const overspendSignature = useMemo(
     () =>
@@ -957,6 +958,14 @@ function BudgetApp({ user, notice, onNotice }) {
         onAddContribution={addGoalContribution}
         onDeleteGoal={deleteGoal}
         onSaveGoal={saveGoal}
+        savingsData={savingsData}
+      />
+    ),
+    savings: (
+      <SavingsPage
+        formatCurrency={formatCurrency}
+        goals={enrichedGoals}
+        savingsData={savingsData}
       />
     ),
       settings: (
@@ -2373,13 +2382,15 @@ function BillsPage({ bills, categories, formatCurrency, onDeleteBill, onSaveBill
   )
 }
 
-function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onSaveGoal }) {
+function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onSaveGoal, savingsData }) {
   const [form, setForm] = useState({ name: '', target_amount: '', current_amount: 0, deadline: '' })
   const [editingId, setEditingId] = useState(null)
   const [contributionDrafts, setContributionDrafts] = useState({})
   const now = new Date()
   const totalSaved = goals.reduce((sum, goal) => sum + Number(goal.current_amount || 0), 0)
   const totalTarget = goals.reduce((sum, goal) => sum + Number(goal.target_amount || 0), 0)
+  const completedGoals = goals.filter((goal) => Number(goal.current_amount || 0) >= Number(goal.target_amount || 0)).length
+  const onTrackGoals = goals.filter((goal) => goal.deadline_status !== 'behind' && goal.deadline_status !== 'at-risk').length
   const closestGoal = [...goals]
     .sort(
       (left, right) =>
@@ -2397,14 +2408,14 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
   return (
     <div className="space-y-6">
       <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
-        <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+        <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
           <div>
             <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Goals</p>
-            <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Savings goals with monthly carry-over</h2>
-            <p className="mt-3 max-w-xl text-sm text-[var(--text-secondary)]">
-              Track the total you have saved, keep your next milestone visible, and add monthly contributions without digging through the page.
+            <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Savings goals with sharper planning</h2>
+            <p className="mt-3 max-w-2xl text-sm text-[var(--text-secondary)]">
+              Track milestones, spot pacing issues earlier, and keep each goal moving with clearer contribution history and deadline guidance.
             </p>
-            <div className="mt-6 grid gap-3 sm:grid-cols-3">
+            <div className="mt-6 grid gap-3 sm:grid-cols-4">
               <div className="rounded-3xl bg-[var(--surface-muted)] p-4">
                 <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Saved</p>
                 <p className="mt-3 text-xl font-semibold text-[var(--text-primary)]">{formatCurrency(totalSaved)}</p>
@@ -2417,6 +2428,12 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
                 <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Closest</p>
                 <p className="mt-3 text-sm font-semibold text-[var(--text-primary)]">{closestGoal?.name ?? 'No goals yet'}</p>
               </div>
+              <div className="rounded-3xl bg-[var(--surface-muted)] p-4">
+                <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">On pace</p>
+                <p className="mt-3 text-sm font-semibold text-[var(--text-primary)]">
+                  {goals.length ? `${onTrackGoals}/${goals.length} goals` : 'No goals yet'}
+                </p>
+              </div>
             </div>
           </div>
 
@@ -2425,6 +2442,7 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
             <div className="mt-4 grid gap-4">
               <input type="text" placeholder="Goal name" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} className="field" required />
               <input type="number" min="0" step="0.01" placeholder="Target amount" value={form.target_amount} onChange={(event) => setForm((current) => ({ ...current, target_amount: event.target.value }))} className="field" required />
+              <input type="number" min="0" step="0.01" placeholder="Current saved (optional)" value={form.current_amount} onChange={(event) => setForm((current) => ({ ...current, current_amount: event.target.value }))} className="field" />
               <input type="date" value={form.deadline} onChange={(event) => setForm((current) => ({ ...current, deadline: event.target.value }))} className="field" />
               <button type="submit" className="primary-button">
                 {editingId ? 'Update goal' : 'Create goal'}
@@ -2432,6 +2450,44 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
             </div>
           </form>
         </div>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-2">
+        <ChartCard title="Savings Momentum" subtitle="Contribution trend across all goals">
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={savingsData.monthlyTrend}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-soft)" vertical={false} />
+                <XAxis dataKey="label" stroke="var(--text-muted)" />
+                <YAxis stroke="var(--text-muted)" />
+                <Tooltip formatter={(value) => formatCurrency(value)} />
+                <Bar dataKey="amount" fill="var(--accent)" radius={[16, 16, 6, 6]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </ChartCard>
+
+        <ChartCard title="Goal Allocation" subtitle="How your saved balance is split today">
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie
+                  data={savingsData.allocation.length ? savingsData.allocation : [{ name: 'No savings yet', value: 1, color: '#94a3b8' }]}
+                  dataKey="value"
+                  nameKey="name"
+                  innerRadius={70}
+                  outerRadius={110}
+                  paddingAngle={3}
+                >
+                  {(savingsData.allocation.length ? savingsData.allocation : [{ color: '#94a3b8' }]).map((entry) => (
+                    <Cell key={entry.name ?? entry.color} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip formatter={(value) => formatCurrency(value)} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        </ChartCard>
       </section>
 
       <div className="grid gap-6">
@@ -2455,7 +2511,7 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
                     {formatCurrency(goal.current_amount)} saved of {formatCurrency(goal.target_amount)}
                   </p>
                   <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                    {formatCurrency(Math.max(Number(goal.target_amount) - Number(goal.current_amount), 0))} left • {estimateMonthsRemaining(goal)}
+                    {formatCurrency(Math.max(Number(goal.target_amount) - Number(goal.current_amount), 0))} left | {estimateMonthsRemaining(goal)}
                   </p>
                 </div>
                 <div className="flex gap-3 text-sm">
@@ -2482,6 +2538,27 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
 
               <div className="mt-5 h-3 rounded-full bg-[var(--border-soft)]">
                 <div className="h-3 rounded-full bg-[var(--accent)]" style={{ width: `${progress}%` }} />
+              </div>
+
+              <div className="mt-5 grid gap-3 md:grid-cols-4">
+                <div className="rounded-2xl bg-[var(--surface-muted)] p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Average</p>
+                  <p className="mt-2 text-sm font-semibold text-[var(--text-primary)]">{formatCurrency(goal.average_monthly_contribution)}</p>
+                </div>
+                <div className="rounded-2xl bg-[var(--surface-muted)] p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Needed pace</p>
+                  <p className="mt-2 text-sm font-semibold text-[var(--text-primary)]">{goal.required_monthly_pace_label}</p>
+                </div>
+                <div className="rounded-2xl bg-[var(--surface-muted)] p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Next milestone</p>
+                  <p className="mt-2 text-sm font-semibold text-[var(--text-primary)]">{goal.next_milestone_label}</p>
+                </div>
+                <div className="rounded-2xl bg-[var(--surface-muted)] p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Deadline</p>
+                  <p className={cn('mt-2 text-sm font-semibold', goal.deadline_status_tone)}>
+                    {goal.deadline_status_label}
+                  </p>
+                </div>
               </div>
 
               <div className="mt-6 rounded-[1.5rem] bg-[var(--surface-muted)] p-4">
@@ -2531,6 +2608,23 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
                 </div>
               </div>
 
+              {goal.contribution_chart.length > 0 && (
+                <div className="mt-5 rounded-[1.5rem] bg-[var(--surface-muted)] p-4">
+                  <p className="text-sm font-medium text-[var(--text-primary)]">Contribution history</p>
+                  <div className="mt-4 h-52">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={goal.contribution_chart}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border-soft)" vertical={false} />
+                        <XAxis dataKey="label" stroke="var(--text-muted)" />
+                        <YAxis stroke="var(--text-muted)" />
+                        <Tooltip formatter={(value) => formatCurrency(value)} />
+                        <Bar dataKey="amount" fill="var(--accent)" radius={[12, 12, 4, 4]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+
               <div className="mt-5 space-y-3">
                 {goal.contributions.slice(0, 4).map((entry) => (
                   <div key={entry.id} className="flex items-center justify-between rounded-2xl bg-[var(--surface-muted)] px-4 py-3 text-sm">
@@ -2551,6 +2645,120 @@ function GoalsPage({ formatCurrency, goals, onAddContribution, onDeleteGoal, onS
           </section>
         )}
       </div>
+
+      {goals.length > 0 && (
+        <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+              <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Completed</p>
+              <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">{completedGoals}</p>
+            </div>
+            <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+              <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Monthly average</p>
+              <p className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">{formatCurrency(savingsData.averageMonthlyContribution)}</p>
+            </div>
+            <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
+              <p className="text-xs uppercase tracking-[0.25em] text-[var(--text-muted)]">Next target</p>
+              <p className="mt-3 text-sm font-semibold text-[var(--text-primary)]">{closestGoal?.next_milestone_label ?? 'Keep saving'}</p>
+            </div>
+          </div>
+        </section>
+      )}
+    </div>
+  )
+}
+
+function SavingsPage({ formatCurrency, goals, savingsData }) {
+  return (
+    <div className="space-y-6">
+      <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Savings</p>
+        <h2 className="mt-2 text-3xl font-semibold text-[var(--text-primary)]">Your savings portfolio</h2>
+        <p className="mt-3 max-w-2xl text-sm text-[var(--text-secondary)]">
+          See total progress, contribution momentum, and how your current savings are distributed across every goal.
+        </p>
+
+        <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <SummaryCard label="Saved" value={formatCurrency(savingsData.totalSaved)} tone="positive" />
+          <SummaryCard label="Remaining" value={formatCurrency(savingsData.totalRemaining)} tone="neutral" />
+          <SummaryCard label="Monthly Avg" value={formatCurrency(savingsData.averageMonthlyContribution)} tone="neutral" />
+          <SummaryCard label="Completed" value={`${savingsData.completedGoals}/${goals.length || 0}`} tone="neutral" />
+        </div>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-2">
+        <ChartCard title="Contribution Trend" subtitle="Last 6 months across all savings goals">
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={savingsData.monthlyTrend}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-soft)" vertical={false} />
+                <XAxis dataKey="label" stroke="var(--text-muted)" />
+                <YAxis stroke="var(--text-muted)" />
+                <Tooltip formatter={(value) => formatCurrency(value)} />
+                <Line type="monotone" dataKey="amount" stroke="var(--accent)" strokeWidth={3} dot={{ r: 4 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </ChartCard>
+
+        <ChartCard title="Allocation" subtitle="Current savings by goal">
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie
+                  data={savingsData.allocation.length ? savingsData.allocation : [{ name: 'No savings yet', value: 1, color: '#94a3b8' }]}
+                  dataKey="value"
+                  nameKey="name"
+                  innerRadius={70}
+                  outerRadius={110}
+                  paddingAngle={3}
+                >
+                  {(savingsData.allocation.length ? savingsData.allocation : [{ color: '#94a3b8' }]).map((entry) => (
+                    <Cell key={entry.name ?? entry.color} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip formatter={(value) => formatCurrency(value)} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        </ChartCard>
+      </section>
+
+      <section className="rounded-[2rem] border border-[var(--border-soft)] bg-[var(--surface)] p-6 shadow-soft">
+        <p className="text-xs uppercase tracking-[0.3em] text-[var(--text-muted)]">Goal snapshot</p>
+        <h2 className="mt-2 text-2xl font-semibold text-[var(--text-primary)]">Where each goal stands</h2>
+
+        <div className="mt-6 space-y-4">
+          {goals.length ? (
+            goals.map((goal) => {
+              const progress = Math.min((Number(goal.current_amount || 0) / Number(goal.target_amount || 1)) * 100, 100)
+              return (
+                <div key={goal.id} className="rounded-3xl bg-[var(--surface-muted)] p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div>
+                      <p className="text-lg font-semibold text-[var(--text-primary)]">{goal.name}</p>
+                      <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                        {formatCurrency(goal.current_amount)} of {formatCurrency(goal.target_amount)} saved
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-semibold text-[var(--text-primary)]">{progress.toFixed(0)}%</p>
+                      <p className="mt-1 text-sm text-[var(--text-secondary)]">{goal.deadline_status_label}</p>
+                    </div>
+                  </div>
+                  <div className="mt-4 h-3 rounded-full bg-[var(--border-soft)]">
+                    <div className="h-3 rounded-full bg-[var(--accent)]" style={{ width: `${progress}%` }} />
+                  </div>
+                </div>
+              )
+            })
+          ) : (
+            <div className="rounded-3xl border border-dashed border-[var(--border-soft)] bg-[var(--surface-muted)] p-8 text-center text-[var(--text-secondary)]">
+              Create a savings goal to populate this tab.
+            </div>
+          )}
+        </div>
+      </section>
     </div>
   )
 }
@@ -4099,15 +4307,136 @@ function summarizeExpenseCategories(transactions, categoryMap) {
 function enrichGoals(goals, contributions) {
   return goals.map((goal) => {
     const goalContributions = contributions.filter((entry) => entry.goal_id === goal.id)
+    const sortedContributions = [...goalContributions].sort(
+      (left, right) => new Date(left.year, left.month - 1, 1) - new Date(right.year, right.month - 1, 1),
+    )
+    const currentAmount = Number(goal.current_amount || 0)
+    const targetAmount = Number(goal.target_amount || 0)
+    const remaining = Math.max(targetAmount - currentAmount, 0)
+    const activeMonths = new Set(goalContributions.map((entry) => `${entry.year}-${entry.month}`)).size
+    const averageMonthlyContribution =
+      activeMonths > 0 ? goalContributions.reduce((sum, entry) => sum + Number(entry.amount), 0) / activeMonths : 0
+    const monthsUntilDeadline = goal.deadline ? getMonthsUntil(goal.deadline) : null
+    const requiredMonthlyPace = monthsUntilDeadline && monthsUntilDeadline > 0 ? remaining / monthsUntilDeadline : 0
+    const nextMilestoneValue =
+      targetAmount <= 0 || currentAmount >= targetAmount
+        ? targetAmount
+        : Math.min(targetAmount, Math.ceil((currentAmount / targetAmount) * 4 + 1) * 25 * (targetAmount / 100))
+    const deadlineStatus =
+      !goal.deadline
+        ? 'flexible'
+        : remaining <= 0
+          ? 'completed'
+          : averageMonthlyContribution === 0
+            ? 'at-risk'
+            : requiredMonthlyPace <= averageMonthlyContribution * 0.9
+              ? 'ahead'
+              : requiredMonthlyPace <= averageMonthlyContribution * 1.15
+                ? 'on-track'
+                : 'behind'
+
     return {
       ...goal,
-      current_amount: Number(goal.current_amount || 0),
-      target_amount: Number(goal.target_amount || 0),
+      current_amount: currentAmount,
+      target_amount: targetAmount,
       contributions: goalContributions,
       total_contributed: goalContributions.reduce((sum, entry) => sum + Number(entry.amount), 0),
-      active_months: new Set(goalContributions.map((entry) => `${entry.year}-${entry.month}`)).size,
+      active_months: activeMonths,
+      average_monthly_contribution: averageMonthlyContribution,
+      required_monthly_pace: requiredMonthlyPace,
+      required_monthly_pace_label:
+        remaining <= 0
+          ? 'Completed'
+          : monthsUntilDeadline && monthsUntilDeadline > 0
+            ? `${currency(requiredMonthlyPace)} / mo`
+            : 'No deadline',
+      next_milestone_label:
+        remaining <= 0
+          ? 'Goal reached'
+          : `${currency(nextMilestoneValue)} milestone`,
+      deadline_status: deadlineStatus,
+      deadline_status_label:
+        deadlineStatus === 'completed'
+          ? 'Goal reached'
+          : deadlineStatus === 'ahead'
+            ? 'Ahead of pace'
+            : deadlineStatus === 'on-track'
+              ? 'On track'
+              : deadlineStatus === 'behind'
+                ? 'Needs a faster pace'
+                : deadlineStatus === 'at-risk'
+                  ? 'No pace set yet'
+                  : 'Flexible deadline',
+      deadline_status_tone:
+        deadlineStatus === 'ahead'
+          ? 'text-emerald-600'
+          : deadlineStatus === 'on-track'
+            ? 'text-[var(--text-primary)]'
+            : deadlineStatus === 'completed'
+              ? 'text-emerald-600'
+              : deadlineStatus === 'flexible'
+                ? 'text-[var(--text-primary)]'
+                : 'text-rose-500',
+      contribution_chart: sortedContributions.slice(-6).map((entry) => ({
+        label: new Date(entry.year, entry.month - 1, 1).toLocaleString('en-US', { month: 'short' }),
+        amount: Number(entry.amount),
+      })),
     }
   })
+}
+
+function buildSavingsData(goals) {
+  const monthlyMap = new Map()
+  const allocation = goals
+    .filter((goal) => Number(goal.current_amount || 0) > 0)
+    .map((goal) => ({
+      name: goal.name,
+      value: Number(goal.current_amount || 0),
+      color: getCategoryVisual(goal.name).color,
+    }))
+
+  goals.forEach((goal) => {
+    goal.contributions.forEach((entry) => {
+      const key = `${entry.year}-${String(entry.month).padStart(2, '0')}`
+      monthlyMap.set(key, (monthlyMap.get(key) ?? 0) + Number(entry.amount))
+    })
+  })
+
+  const monthlyTrend = [...monthlyMap.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .slice(-6)
+    .map(([key, amount]) => {
+      const [year, month] = key.split('-').map(Number)
+      return {
+        label: new Date(year, month - 1, 1).toLocaleString('en-US', { month: 'short' }),
+        amount,
+      }
+    })
+
+  const totalSaved = goals.reduce((sum, goal) => sum + Number(goal.current_amount || 0), 0)
+  const totalTarget = goals.reduce((sum, goal) => sum + Number(goal.target_amount || 0), 0)
+
+  return {
+    allocation,
+    averageMonthlyContribution:
+      monthlyTrend.length > 0 ? monthlyTrend.reduce((sum, item) => sum + Number(item.amount), 0) / monthlyTrend.length : 0,
+    completedGoals: goals.filter((goal) => Number(goal.current_amount || 0) >= Number(goal.target_amount || 0)).length,
+    monthlyTrend,
+    totalRemaining: Math.max(totalTarget - totalSaved, 0),
+    totalSaved,
+  }
+}
+
+function getMonthsUntil(dateValue) {
+  const now = new Date(`${today()}T00:00:00`)
+  const deadline = new Date(`${dateValue}T00:00:00`)
+  if (Number.isNaN(deadline.getTime()) || deadline <= now) {
+    return 0
+  }
+  const years = deadline.getFullYear() - now.getFullYear()
+  const months = deadline.getMonth() - now.getMonth()
+  const totalMonths = years * 12 + months
+  return Math.max(totalMonths + (deadline.getDate() >= now.getDate() ? 1 : 0), 1)
 }
 
 export default App
