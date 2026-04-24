@@ -7,10 +7,16 @@ export const DEFAULT_CATEGORIES = [
   { name: 'Health', color: '#10b981', emoji: '💊', type: 'expense' },
   { name: 'Utilities', color: '#06b6d4', emoji: '💡', type: 'expense' },
   { name: 'Rent', color: '#6366f1', emoji: '🏠', type: 'expense' },
+  { name: 'Insurance', color: '#0f766e', emoji: '🛡️', type: 'expense' },
+  { name: 'Subscriptions', color: '#7c2d12', emoji: '📺', type: 'expense' },
+  { name: 'Education', color: '#1d4ed8', emoji: '📚', type: 'expense' },
+  { name: 'Travel', color: '#0891b2', emoji: '✈️', type: 'expense' },
   { name: 'Other', color: '#64748b', emoji: '📦', type: 'expense' },
   { name: 'Salary', color: '#2563eb', emoji: '💼', type: 'income' },
   { name: 'Freelance', color: '#0f766e', emoji: '🧑‍💻', type: 'income' },
   { name: 'Gift', color: '#db2777', emoji: '🎁', type: 'income' },
+  { name: 'Bonus', color: '#ca8a04', emoji: '🏅', type: 'income' },
+  { name: 'Investment', color: '#059669', emoji: '📈', type: 'income' },
   { name: 'Other Income', color: '#7c3aed', emoji: '💸', type: 'income' },
 ]
 

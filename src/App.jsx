@@ -818,6 +818,7 @@ function BudgetApp({ user, notice, onNotice }) {
     ),
     settings: (
       <SettingsPage
+        key={`${settings.theme}|${settings.accent_color}|${settings.currency}|${settings.sidebar_title ?? ''}|${settings.sidebar_description ?? ''}`}
         budgetMap={budgetMap}
         categories={categories}
         formatCurrency={formatCurrency}
@@ -2116,33 +2117,33 @@ function SettingsPage({
         <div className="mt-6 grid gap-6 lg:grid-cols-3">
           <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
             <p className="text-sm font-medium text-[var(--text-primary)]">Mode</p>
-            <div className="mt-4 flex gap-3">
+            <div className="mt-4 grid grid-cols-2 gap-3">
               {['light', 'dark'].map((mode) => (
                 <button
                   key={mode}
                   type="button"
                   onClick={() => setDraft((current) => ({ ...current, theme: mode }))}
                   className={cn(
-                    'rounded-full px-4 py-2 text-sm capitalize',
+                    'w-full rounded-2xl px-4 py-2 text-sm capitalize',
                     draft.theme === mode ? 'bg-[var(--accent-soft)] text-[var(--accent-strong)]' : 'bg-[var(--surface)] text-[var(--text-secondary)]',
                   )}
-                    >
-                      {mode}
-                    </button>
+                >
+                  {mode}
+                </button>
               ))}
             </div>
           </div>
 
           <div className="rounded-3xl bg-[var(--surface-muted)] p-5">
             <p className="text-sm font-medium text-[var(--text-primary)]">Accent</p>
-            <div className="mt-4 flex gap-3">
+            <div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-3">
               {ACCENT_OPTIONS.map((accent) => (
                 <button
                   key={accent}
                   type="button"
                   onClick={() => setDraft((current) => ({ ...current, accent_color: accent }))}
                   className={cn(
-                    'flex items-center gap-2 rounded-full px-4 py-2 text-sm capitalize',
+                    'flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-2 text-sm capitalize',
                     draft.accent_color === accent
                       ? 'bg-[var(--accent-soft)] text-[var(--accent-strong)]'
                       : 'bg-[var(--surface)] text-[var(--text-secondary)]',
@@ -2657,7 +2658,24 @@ async function ensureCategories(userId) {
     .order('name')
 
   if (error) throw error
-  if (data?.length) return data
+  if (data?.length) {
+    const existingKeys = new Set(data.map((category) => `${category.type}:${normalizeText(category.name)}`))
+    const missingDefaults = DEFAULT_CATEGORIES.filter(
+      (category) => !existingKeys.has(`${category.type}:${normalizeText(category.name)}`),
+    )
+
+    if (!missingDefaults.length) {
+      return data
+    }
+
+    const { data: insertedDefaults, error: insertMissingError } = await supabase
+      .from('categories')
+      .insert(missingDefaults.map((category) => ({ ...category, user_id: userId })))
+      .select('id, user_id, name, color, emoji, type')
+
+    if (insertMissingError) throw insertMissingError
+    return [...data, ...(insertedDefaults ?? [])]
+  }
 
   const { data: inserted, error: insertError } = await supabase
     .from('categories')
